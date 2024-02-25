@@ -7,7 +7,6 @@ from numpy import ndarray
 from py_search.base import Problem, Node
 import hashlib
 
-
 TILE_DIGEST_SIZE = 4  # in bytes
 NP_ENCODED_TILE_TYPE = "longlong"
 WORLD_DIGEST_SIZE = 4
@@ -141,7 +140,7 @@ class WFC_Sample:
 
 class WFC_Problem(Problem):
     def __init__(self, sample: WFC_Sample, starting_state: ndarray, seed: int = 0, use_8_cardinals: bool = False,
-                 max_freq_adjust: float = 1, plateau_check_interval: int = -1,
+                 relax_validation: bool = False, max_freq_adjust: float = 1, plateau_check_interval: int = -1,
                  starting_temperature: float = 50, min_min_temperature: float = 0, max_min_temperature: float = 80,
                  reverse_depth_w: float = 1, node_cost_w: float = 1, path_entropy_average_w: float = 0,
                  stop_proxy: ValueProxy = None, ticker_proxy: ValueProxy = None
@@ -174,6 +173,7 @@ class WFC_Problem(Problem):
         self._ticker_proxy = ticker_proxy
         self.rng = np.random.default_rng(seed=seed)
         self._sample: WFC_Sample = sample
+        self._relaxed_validation = relax_validation
 
         non_zeroes = np.count_nonzero(starting_state)
         self._number_of_tiles_to_process = starting_state.size - non_zeroes
@@ -239,7 +239,6 @@ class WFC_Problem(Problem):
         @param is_reopening:
         @return:
         """
-        # 0 => nothing; 1 => open; 2 => closed
         wost = self._temp_world_open_super_tiles
 
         indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
@@ -276,17 +275,102 @@ class WFC_Problem(Problem):
             if self._temp_world_state[_y, _x] == 0:
                 wost.add((_y, _x))
 
+    @cache
+    def tile_remains_valid_4cardinals(self, p2, p4, p5, p6, p8):
+        """[p1->tl, ..., p9->br] ; where p5 is the center tile"""
+        super_tile_data = self._sample.get_super_tile_data()
+
+        def is_possible(super_tile):
+            return not (super_tile[1, 1] != p5
+                        or p2 != 0 and super_tile[0, 1] != p2
+                        or p4 != 0 and super_tile[1, 0] != p4
+                        or p6 != 0 and super_tile[1, 2] != p6
+                        or p8 != 0 and super_tile[2, 1] != p8)
+
+        return any(is_possible(stile) for stile, _ in super_tile_data)
+
+    @cache
+    def tile_remains_valid_8cardinals(self, p1, p2, p3, p4, p5, p6, p7, p8, p9):
+        super_tile_data = self._sample.get_super_tile_data()
+
+        def is_possible(super_tile):
+            return not (super_tile[1, 1] != p5
+                        or p1 != 0 and super_tile[0, 0] != p1
+                        or p2 != 0 and super_tile[0, 1] != p2
+                        or p3 != 0 and super_tile[0, 2] != p3
+                        or p4 != 0 and super_tile[1, 0] != p4
+                        or p6 != 0 and super_tile[1, 2] != p6
+                        or p7 != 0 and super_tile[2, 0] != p7
+                        or p8 != 0 and super_tile[2, 1] != p8
+                        or p9 != 0 and super_tile[2, 2] != p9
+                        )
+
+        return any(is_possible(stile) for stile, _ in super_tile_data)
+
+    def validate_adjacent(self, tile_data: dict[int, int], world_state: ndarray,
+                          indices_to_check: list[tuple[int, int]], wy: int, wx: int):
+        """
+
+        @param tile_data: the potential tile types to open at the given world position (wy, wx);
+                dict (key-> tile type, value-> counts)
+        @param indices_to_check: indices to check surrounding (wy, wx)
+        @param wy: tile whose vicinity is to be validated y coordinate in the world
+        @param wx: tile whose vicinity is to be validated x coordinate in the world
+        @return:
+        """
+        if len(tile_data) == 0:
+            return {}
+
+        # create a 5x5 matrix with all the required data; out of bounds is set to zero
+        #  * both out of bounds & not filled are set to zero, so there is only one condition to check
+        #  * using an aux matrix might improve data locality ( long shot; copium, most likely ... )
+        roi_matrix = np.pad(world_state[max(0, wy - 2):min(world_state.shape[0], wy + 3),
+                            max(0, wx - 2):min(world_state.shape[1], wx + 3)], (
+                                (max(2 - wy, 0), max(wy + 3 - world_state.shape[0], 0)),
+                                (max(2 - wx, 0), max(wx + 3 - world_state.shape[1], 0))), constant_values=0)
+        assert roi_matrix.shape[0] == 5 and roi_matrix.shape[1] == 5
+
+        def check_if_all_adjacent_tiles_remain_valid_v2(tile_type):
+            roi_matrix[2, 2] = tile_type  # simulate tile placement
+            for y, x in indices_to_check:
+                if roi_matrix[y - wy + 2, x - wx + 2] == 0:
+                    continue
+
+                # get the corresponding values from the 5x5 roi_matrix
+                adjacent_states = roi_matrix[y - wy + 2 - 1:y - wy + 2 + 2,
+                                  x - wx + 2 - 1:x - wx + 2 + 2].flatten().tolist()
+
+                if self._use_8cardinals:
+                    if not self.tile_remains_valid_8cardinals(*adjacent_states):
+                        return False
+                else:
+                    if not self.tile_remains_valid_4cardinals(*[adjacent_states[i] for i in [1, 3, 4, 5, 7]]):
+                        return False
+
+            return True
+
+        new_tile_data = {k: c for k, c in tile_data.items() if check_if_all_adjacent_tiles_remain_valid_v2(k)}
+        return new_tile_data
+
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
         world_indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
         adjacent_states = [world_state[_y, _x] if 0 <= _y < world_state.shape[0] and 0 <= _x < world_state.shape[1]
                            else 0 for (_y, _x) in world_indices_to_check]
-        tiles, probabilities = \
+        potential_tiles_data = \
             self.get_cell_potential_states_8cardinals(*adjacent_states) \
                 if self._use_8cardinals else \
                 self.get_cell_potential_states_4cardinals(*[adjacent_states[i] for i in [1, 3, 4, 6]])
 
-        if len(tiles) == 0:
+        # check if adjacent, non-empty tiles, remain valid; if not, remove potential tile
+        if not self._relaxed_validation:
+            potential_tiles_data = self.validate_adjacent(potential_tiles_data, world_state,
+                                                      world_indices_to_check, y, x)
+
+        # using the stored sample counts, compute each tile type probability
+        tile_types, probabilities = self.map_to_probabilities(potential_tiles_data)
+
+        if len(tile_types) == 0:
             return [], None, None  # nothing to compute, so just return early
 
         # generate random weights and temperature
@@ -295,8 +379,8 @@ class WFC_Problem(Problem):
 
         # GET tile type freq in original samples AND in current generation
         tile_data = self._sample.get_tile_data()
-        sample_freqs = np.array([tile_data[t][1] for t in tiles])
-        current_counts = np.array([self._tile_counts[t] for t in tiles])
+        sample_freqs = np.array([tile_data[t][1] for t in tile_types])
+        current_counts = np.array([self._tile_counts[t] for t in tile_types])
         current_freqs = current_counts / max(1, depth)
 
         if self._max_freq_adjust == 0.0:
@@ -318,7 +402,7 @@ class WFC_Problem(Problem):
                              + (rands * 2 - 1) * temp
                              , 0, 1)) * entropy
 
-        return tiles, costs, entropy
+        return tile_types, costs, entropy
 
     @cache
     def get_cell_potential_states_8cardinals(self, p1, p2, p3, p4, p6, p7, p8, p9):
@@ -327,7 +411,7 @@ class WFC_Problem(Problem):
         [[1,2,3],
          [4,c,6],
          [7,8,9]]
-        @return: list of tuples (state, prob.)
+        @return: dictionary [ key->tile type, value->counts ]
         """
 
         def is_possible(super_tile):
@@ -346,7 +430,7 @@ class WFC_Problem(Problem):
             if is_possible(stile):
                 pcs[stile[1, 1]] += count
 
-        return self.map_to_probabilities(pcs)
+        return pcs
 
     @cache
     def get_cell_potential_states_4cardinals(self, p2, p4, p6, p8):
@@ -370,7 +454,7 @@ class WFC_Problem(Problem):
             if is_possible(stile):
                 pcs[stile[1, 1]] += count
 
-        return self.map_to_probabilities(pcs)
+        return pcs
 
     def map_to_probabilities(self, pcs):
         if len(pcs) == 0:
@@ -403,8 +487,8 @@ class WFC_Problem(Problem):
         """
         Generate all possible next states
         """
-        if (self._stop_proxy is not None and self._stop_proxy.get()) :
-            #print("")
+        if (self._stop_proxy is not None and self._stop_proxy.get()):
+            # print("")
             raise InterruptedError()
 
         # world state is kept in self._temp_world_state; updated here when closing the node.
@@ -426,7 +510,7 @@ class WFC_Problem(Problem):
         if depth > self._best_node.depth():
             self._best_node = node
             if self._ticker_proxy is not None:
-                self._ticker_proxy.set(self._ticker_proxy.get()+1)
+                self._ticker_proxy.set(self._ticker_proxy.get() + 1)
         if depth >= self._number_of_tiles_to_process:
             self._stop = True
             print("\nEnded search with all tiles filled.")
@@ -439,7 +523,8 @@ class WFC_Problem(Problem):
                     self._stop = True
                     print("\nEnded due to depth plateauing.")
                     if self._ticker_proxy is not None:
-                        self._ticker_proxy.set(self._ticker_proxy.get() + self._number_of_tiles_to_process - self._best_node.depth())
+                        self._ticker_proxy.set(
+                            self._ticker_proxy.get() + self._number_of_tiles_to_process - self._best_node.depth())
                     return
                 self._plateau_check_ticker = 0
                 self._prev_best_depth = self._best_node.depth()
@@ -447,7 +532,7 @@ class WFC_Problem(Problem):
         iyxs = self._temp_world_open_super_tiles
         potential_collapses = [self.get_cell_potential_states_and_costs(y, x, world_state, depth) for (y, x) in iyxs]
 
-        #print(f"depth = {depth:5,.0f}  |  temperature={self._min_temperature:5,.1f}  |  "
+        # print(f"depth = {depth:5,.0f}  |  temperature={self._min_temperature:5,.1f}  |  "
         #      f"freq_depth_adjustment={self._tile_freq_adjustment_func(depth):6,.2f}  |  "
         #      f"open tiles:{len(iyxs):5,.0f}    ", end="\r")
 

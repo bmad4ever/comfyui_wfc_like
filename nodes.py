@@ -71,6 +71,7 @@ class WFC_GenerateNode:
                     "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                     "max_freq_adjust": ("FLOAT", {"default": 1, "min": 0, "max": 1, "step": .01}),
                     "use_8_cardinals": ("BOOLEAN", {"default": False}),
+                    "relax_validation": ("BOOLEAN", {"default": False}),
                     "plateau_check_interval": ("INT", {"default": -1, "min": -1, "max": 10000}),
                 },
             "optional":

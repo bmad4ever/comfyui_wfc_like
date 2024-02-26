@@ -1,28 +1,41 @@
 from _operator import xor
+from threading import Event, Thread
 from py_search.informed import best_first_search
 from comfy import utils
-from comfy.model_management import throw_exception_if_processing_interrupted, processing_interrupted
 from .wcf import *
 
 
-def waiting_loop(abort_loop_event, interruption_proxy: ValueProxy, pbar: utils.ProgressBar, ticker_proxy: ValueProxy, total_steps):
+def waiting_loop(abort_loop_event: Event, pbar: utils.ProgressBar, total_steps, shm_name, ntasks=1):
     """
-    Listens for interrupts and propagates to Problem running using interruption_proxy.
+        Listens for interrupts and propagates to Problem running using interruption_proxy.
     Updates progress_bar via ticker_proxy, updated within Problem instances.
 
     @param abort_loop_event: to be triggered in the main thread once the problem(s) have been solved
-    @param interruption_proxy: proxy value used to cancel the search(es)
     @param pbar: comfyui progress bar to update every 100 milliseconds
-    @param ticker_proxy: the max depth so far (or sum of max depths in case of many problems)
     @param total_steps: the total number of nodes to process in the problem(s)
+    @param shm_name: shared memory name for a shared list with the elements: [ Boolean, Integer, Integer... ], in this respective order
     """
     from time import sleep
+    from comfy.model_management import processing_interrupted
+    shm_list = ShareableList(name=shm_name)
     while not abort_loop_event.is_set():
         sleep(.1)  # pause for 1 second
         if processing_interrupted():
-            interruption_proxy.set(True)
+            shm_list[0] = True
             return
-        pbar.update_absolute(ticker_proxy.get(), total_steps)
+        pbar.update_absolute(sum(list(shm_list)[1:ntasks+1]), total_steps)
+    return
+
+
+def terminate_generation(finished_event, shm_list, pbt: Thread):
+    finished_event.set()
+    pbt.join()
+    interrupted = shm_list[0]
+    shm_list.shm.close()
+    shm_list.shm.unlink()
+    if interrupted:
+        from comfy.model_management import throw_exception_if_processing_interrupted
+        throw_exception_if_processing_interrupted()
 
 
 class WFC_SampleNode:
@@ -91,10 +104,6 @@ class WFC_GenerateNode:
     CATEGORY = "Bmad/WFC"
 
     def compute(self, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
-        from multiprocessing import Manager
-        from multiprocessing.managers import ValueProxy
-        from threading import Event, Thread
-
         if custom_temperature_config is not None:
             kwargs.update(custom_temperature_config)
 
@@ -104,31 +113,18 @@ class WFC_GenerateNode:
         # prepare stuff to process interrupts & update bar
         # TODO count is also done inside Problem, maybe should use as optional arg to avoid repeating the operation
         ss = kwargs["starting_state"]
-        total_tiles_to_proc = ss.size-np.count_nonzero(ss)
-        manager = Manager()
-        stop: ValueProxy = manager.Value('b', False)  # Set to True to abort
-        ticker: ValueProxy = manager.Value('i', 0)  # counts max depth increments
-        kwargs.update({"stop_proxy": stop})
-        kwargs.update({"ticker_proxy": ticker})
+        total_tiles_to_proc = ss.size - np.count_nonzero(ss)
+        shm_list = ShareableList([False, int(0)])
+        shm_name = shm_list.shm.name
         finished_event = Event()
         pbar: utils.ProgressBar = utils.ProgressBar(total_tiles_to_proc)
 
-        t = Thread(target=waiting_loop, args=(finished_event, stop, pbar, ticker, total_tiles_to_proc))
+        t = Thread(target=waiting_loop, args=(finished_event, pbar, total_tiles_to_proc, shm_name))
         t.start()
 
-        problem = WFC_Problem(**kwargs)
-        try:
-            next(best_first_search(problem, graph=True))  # find 1st solution
-        except InterruptedError:
-            pass
-        except StopIteration:
-            print("Exhausted all possibilities without finding a complete solution ; or some irregularity occurred.")
-        finally:
-            finished_event.set()
-            if stop.get():
-                throw_exception_if_processing_interrupted()
+        result = generate_single(shm_name, kwargs)
 
-        result = problem.get_solution_state()
+        terminate_generation(finished_event, shm_list, t)
         return (result,)
 
 
@@ -266,7 +262,10 @@ class WFC_Filter:
         return (new_state,)
 
 
-def generate_single(i_kwargs):
+def generate_single(stop_and_ticker_shm_name, i_kwargs, pid=0): #stop, ticker,
+    shm_list = ShareableList(name=stop_and_ticker_shm_name)
+    i_kwargs.update({"stop_and_ticker_shm_list": shm_list})
+    i_kwargs.update({"pid": pid})
     problem = WFC_Problem(**i_kwargs)
     try:
         next(best_first_search(problem, graph=True))  # find 1st solution
@@ -276,6 +275,7 @@ def generate_single(i_kwargs):
         print("Exhausted all possibilities without finding a complete solution ; or some irregularity occurred.")
     result = problem.get_solution_state()
     return result
+
 
 
 class WFC_GenParallel:
@@ -293,10 +293,7 @@ class WFC_GenParallel:
     OUTPUT_IS_LIST = (True,)
 
     def gen(self, max_parallel_tasks, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
-        from multiprocessing import Manager
-        from multiprocessing.managers import ValueProxy
         from joblib import Parallel, delayed
-        from threading import Event, Thread
 
         max_parallel_tasks = max_parallel_tasks[0]
         ct_len = 0 if custom_temperature_config is None else len(custom_temperature_config)
@@ -309,12 +306,9 @@ class WFC_GenParallel:
 
         # TODO count is also done inside Problem, maybe should use as optional arg to avoid repeating the operation
         ss = kwargs["starting_state"]
-        total_tiles_to_proc = sum([i.size-np.count_nonzero(i) for i in ss])
-        total_tiles_to_proc += (ss[-1].size-np.count_nonzero(ss[-1]))*(max_len - len(ss))
+        total_tiles_to_proc = sum([i.size - np.count_nonzero(i) for i in ss])
+        total_tiles_to_proc += (ss[-1].size - np.count_nonzero(ss[-1])) * (max_len - len(ss))
 
-        manager = Manager()
-        stop: ValueProxy = manager.Value('b', False)  # Set to True to abort
-        ticker: ValueProxy = manager.Value('i', 0)  # counts max depth increments
         items = kwargs.items()
         per_gen_inputs = []
         for i in range(max_len):
@@ -323,19 +317,19 @@ class WFC_GenParallel:
                 input_i.update(custom_temperature_config[min(i, ct_len - 1)])
             if cnv_len > 0:
                 input_i.update(custom_node_value_config[min(i, cnv_len - 1)])
-            input_i.update({"stop_proxy": stop})
-            input_i.update({"ticker_proxy": ticker})
             per_gen_inputs.append(input_i)
+
+        shm_list = ShareableList([False] + [int(0)]*max_len)
+        shm_name = shm_list.shm.name
 
         finished_event = Event()
         pbar: utils.ProgressBar = utils.ProgressBar(total_tiles_to_proc)
-        t = Thread(target=waiting_loop, args=(finished_event, stop, pbar, ticker, total_tiles_to_proc))
+        t = Thread(target=waiting_loop, args=(finished_event, pbar, total_tiles_to_proc, shm_name, max_len))
         t.start()
 
-        final_result = Parallel(n_jobs=max_parallel_tasks)(delayed(generate_single)(per_gen_inputs[i]) for i in range(max_len))
+        final_result = Parallel(n_jobs=max_parallel_tasks)(
+            delayed(generate_single)(shm_name, per_gen_inputs[i], i) for i in range(max_len))
 
-        finished_event.set()
-        if stop.get():
-            throw_exception_if_processing_interrupted()
-
+        terminate_generation(finished_event, shm_list, t)
         return (final_result,)
+

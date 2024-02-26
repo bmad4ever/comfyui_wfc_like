@@ -1,6 +1,6 @@
 from collections import defaultdict
 from functools import lru_cache, cache
-from multiprocessing.managers import ValueProxy
+from multiprocessing.shared_memory import ShareableList
 import numpy as np
 import cv2 as cv
 from numpy import ndarray
@@ -143,7 +143,7 @@ class WFC_Problem(Problem):
                  relax_validation: bool = False, max_freq_adjust: float = 1, plateau_check_interval: int = -1,
                  starting_temperature: float = 50, min_min_temperature: float = 0, max_min_temperature: float = 80,
                  reverse_depth_w: float = 1, node_cost_w: float = 1, path_entropy_average_w: float = 0,
-                 stop_proxy: ValueProxy = None, ticker_proxy: ValueProxy = None
+                 stop_and_ticker_shm_list: ShareableList = None, pid: int = 0
                  ):
         """
         @param sample: contains the tiles, their frequencies and "implicit" constraints
@@ -169,8 +169,8 @@ class WFC_Problem(Problem):
         # extra -> the sum of entropies of the closed nodes in the current branch ( at the moment they were closed )
 
         # BASIC DATA
-        self._stop_proxy = stop_proxy
-        self._ticker_proxy = ticker_proxy
+        self._stop_and_ticker = stop_and_ticker_shm_list
+        self._pid = pid
         self.rng = np.random.default_rng(seed=seed)
         self._sample: WFC_Sample = sample
         self._relaxed_validation = relax_validation
@@ -487,7 +487,7 @@ class WFC_Problem(Problem):
         """
         Generate all possible next states
         """
-        if (self._stop_proxy is not None and self._stop_proxy.get()):
+        if self._stop_and_ticker is not None and self._stop_and_ticker[0]:
             # print("")
             raise InterruptedError()
 
@@ -509,8 +509,8 @@ class WFC_Problem(Problem):
         depth = node.depth()
         if depth > self._best_node.depth():
             self._best_node = node
-            if self._ticker_proxy is not None:
-                self._ticker_proxy.set(self._ticker_proxy.get() + 1)
+            if self._stop_and_ticker is not None:
+                self._stop_and_ticker[1+self._pid] += 1
         if depth >= self._number_of_tiles_to_process:
             self._stop = True
             print("\nEnded search with all tiles filled.")
@@ -522,9 +522,8 @@ class WFC_Problem(Problem):
                 if self._prev_best_depth == self._best_node.depth():
                     self._stop = True
                     print("\nEnded due to depth plateauing.")
-                    if self._ticker_proxy is not None:
-                        self._ticker_proxy.set(
-                            self._ticker_proxy.get() + self._number_of_tiles_to_process - self._best_node.depth())
+                    if self._stop_and_ticker is not None:
+                        self._stop_and_ticker[1+self._pid] += self._number_of_tiles_to_process - self._best_node.depth()
                     return
                 self._plateau_check_ticker = 0
                 self._prev_best_depth = self._best_node.depth()

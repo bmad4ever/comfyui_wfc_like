@@ -114,6 +114,9 @@ class WFC_GenerateNode:
         # TODO count is also done inside Problem, maybe should use as optional arg to avoid repeating the operation
         ss = kwargs["starting_state"]
         total_tiles_to_proc = ss.size - np.count_nonzero(ss)
+        if total_tiles_to_proc == 0:
+            return (ss,)
+
         shm_list = ShareableList([False, int(0)])
         shm_name = shm_list.shm.name
         finished_event = Event()
@@ -201,9 +204,9 @@ class WFC_CustomValueWeights:
         return {
             "required":
                 {
-                    "reverse_depth_w": ("FLOAT", {"default": 1, "min": 0, "max": 10, "step": .001}),
-                    "node_cost_w": ("FLOAT", {"default": 1, "min": 0, "max": 10, "step": .001}),
-                    "path_entropy_average_w": ("FLOAT", {"default": 0, "min": 0, "max": 10, "step": .001}),
+                    "reverse_depth_w": ("FLOAT", {"default": 1, "min": 0, "max": 1000, "step": .001}),
+                    "node_cost_w": ("FLOAT", {"default": 1, "min": 0, "max": 1000, "step": .001}),
+                    "prev_state_avg_entropy_w": ("FLOAT", {"default": 0, "min": 0, "max": 1000, "step": .001}),
                 },
         }
 
@@ -267,6 +270,8 @@ def generate_single(stop_and_ticker_shm_name, i_kwargs, pid=0): #stop, ticker,
     i_kwargs.update({"stop_and_ticker_shm_list": shm_list})
     i_kwargs.update({"pid": pid})
     problem = WFC_Problem(**i_kwargs)
+    if problem._number_of_tiles_to_process == 0:
+        return i_kwargs["starting_state"]
     try:
         next(best_first_search(problem, graph=True))  # find 1st solution
     except InterruptedError:

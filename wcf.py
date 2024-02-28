@@ -142,7 +142,7 @@ class WFC_Problem(Problem):
     def __init__(self, sample: WFC_Sample, starting_state: ndarray, seed: int = 0, use_8_cardinals: bool = False,
                  relax_validation: bool = False, max_freq_adjust: float = 1, plateau_check_interval: int = -1,
                  starting_temperature: float = 50, min_min_temperature: float = 0, max_min_temperature: float = 80,
-                 reverse_depth_w: float = 1, node_cost_w: float = 1, path_entropy_average_w: float = 0,
+                 reverse_depth_w: float = 1, node_cost_w: float = 1, prev_state_avg_entropy_w: float = 0,
                  stop_and_ticker_shm_list: ShareableList = None, pid: int = 0
                  ):
         """
@@ -162,11 +162,17 @@ class WFC_Problem(Problem):
         @param max_min_temperature:
         @param reverse_depth_w:
         @param node_cost_w:
-        @param path_entropy_average_w:
+        @param prev_state_avg_entropy_w:
         """
         super().__init__(initial=(0, 0), initial_cost=0, extra=0)
         # initial state -> (depth, hash) -> 0 represents empty world at the start, at zero depth
         # extra -> the sum of entropies of the closed nodes in the current branch ( at the moment they were closed )
+
+        non_zeroes = np.count_nonzero(starting_state)
+        self._number_of_tiles_to_process = starting_state.size - non_zeroes
+        if self._number_of_tiles_to_process == 0:
+            self._stop = True
+            return
 
         # BASIC DATA
         self._stop_and_ticker = stop_and_ticker_shm_list
@@ -175,8 +181,6 @@ class WFC_Problem(Problem):
         self._sample: WFC_Sample = sample
         self._relaxed_validation = relax_validation
 
-        non_zeroes = np.count_nonzero(starting_state)
-        self._number_of_tiles_to_process = starting_state.size - non_zeroes
         self._world_tdims = starting_state.shape
         self._temp_world_state = starting_state.copy()
         self._starting_state = starting_state.copy() if non_zeroes > 0 else None
@@ -191,7 +195,7 @@ class WFC_Problem(Problem):
         # influences the nodes' costs. high temperature lowers the influence of random noise and frequency adjustments
         self._min_temperature = starting_temperature
         self._min_min_temperature, self._max_min_temperature = min_min_temperature, max_min_temperature
-        self._rev_depth_w, self._node_cost_w, self._path_ent_avg_w = reverse_depth_w, node_cost_w, path_entropy_average_w
+        self._rev_depth_w, self._node_cost_w, self._ps_avg_ent_w = reverse_depth_w, node_cost_w, prev_state_avg_entropy_w
 
         # STOP THE SEARCH
         self._best_node = None
@@ -208,6 +212,10 @@ class WFC_Problem(Problem):
 
         tile_data = sample.get_tile_data()
         self._tile_counts = dict(zip(tile_data.keys(), [0] * len(tile_data)))
+        if self._starting_state is not None:
+            for tile in self._starting_state.flat:
+                if tile != 0:
+                    self._tile_counts[tile] += 1
 
         self._max_freq_adjust = max_freq_adjust
         t = self._number_of_tiles_to_process
@@ -391,8 +399,10 @@ class WFC_Problem(Problem):
                     1 - np.minimum(sample_freqs, current_freqs) / np.maximum(sample_freqs, current_freqs))
             adjusted_freqs_diff *= depth_adjustment
         # ===========================================================================
-        entropy: float = - np.sum(probabilities * np.log2(probabilities)) / np.log2(len(probabilities)) if len(
+        entropy: float = - np.sum(probabilities * np.log2(probabilities)) if len(
             probabilities) > 1 else 0
+        #normalized_entropy: float = - np.sum(probabilities * np.log2(probabilities)) / np.log2(len(probabilities)) if len(
+        #    probabilities) > 1 else 0  # the original used, which was multiplied w/ the cost
 
         # TODO -> review formula... multiplication w/ entropy may be too strong for some rules;
         #           consider attenuating entropy on low temperatures or when adjusting freqs
@@ -400,7 +410,7 @@ class WFC_Problem(Problem):
         costs = (1 - np.clip(probabilities
                              + adjusted_freqs_diff * temp
                              + (rands * 2 - 1) * temp
-                             , 0, 1)) * entropy
+                             , 0, 1))
 
         return tile_types, costs, entropy
 
@@ -476,11 +486,10 @@ class WFC_Problem(Problem):
         node_cost = node.cost()
         # if temperature is high, this is the most promising locally
 
-        path_avg_entropy = node.extra / (1 + node.depth())
-        # can be used to backtrack preemptively if path doesn't look strong
-        # the entropies used are the ones obtain when closing a node, so this might be misleading indicator
+        prev_node_boundary_avg_entropy = node.extra
+        # how "fuzzy" is the boundary ( unsure if useful )
 
-        return rev_depth * self._rev_depth_w + node_cost * self._node_cost_w + path_avg_entropy * self._path_ent_avg_w
+        return rev_depth * self._rev_depth_w + node_cost * self._node_cost_w + prev_node_boundary_avg_entropy * self._ps_avg_ent_w
 
     def successors(self, node):
         from py_search.base import Node
@@ -494,7 +503,6 @@ class WFC_Problem(Problem):
         # world state is kept in self._temp_world_state; updated here when closing the node.
         # get_world_state func rollbacks any actions when depth is maintained or decreased.
 
-        cum_entropy = 0
         if node.depth() == 0:
             self._best_node = node
             self.open_nodes_on_depth_zero()
@@ -504,7 +512,6 @@ class WFC_Problem(Problem):
             world_state = self.get_world_state(self._last_node, node)
             self._min_temperature = self.get_new_temperature(node.depth(), self._last_node.depth())
             self._last_node = node
-            cum_entropy = node.parent.extra
 
         depth = node.depth()
         if depth > self._best_node.depth():
@@ -540,6 +547,8 @@ class WFC_Problem(Problem):
             node.node_cost = float("inf")  # the node has now been closed, but it could help w/ debugging
             return
 
+        boundary_avg_entropy = sum(e for _, _, e in potential_collapses)/len(potential_collapses)  # will be lagging by one state
+
         for (y, x), (potential_states, costs, entropy) in zip(iyxs, potential_collapses):
             items = zip(potential_states, costs)
 
@@ -556,7 +565,7 @@ class WFC_Problem(Problem):
                                                   byteorder="big")
                 world_state[y, x] = 0
                 yield Node(state=(depth + 1, world_state_hash),
-                           parent=node, action=((y, x), tile_type), node_cost=cost, extra=cum_entropy + entropy)
+                           parent=node, action=((y, x), tile_type), node_cost=cost, extra=boundary_avg_entropy)
 
     def goal_test(self, state_node, goal_node=None):
         # state is not kept in each node, so the checks are done when closing a node.
@@ -621,15 +630,15 @@ class WFC_Problem(Problem):
                 wost.add((y, x))
 
     def revert_action(self, node_action):
-        (pos, state) = node_action
+        (pos, tile_type) = node_action
         self._tile_counts[self._temp_world_state[*pos]] -= 1
         self._temp_world_state[*pos] = 0
         self.update_open_nodes(*pos, is_reopening=True)
 
     def apply_action(self, node_action):
-        (pos, state) = node_action
-        self._temp_world_state[*pos] = state
-        self._tile_counts[state] += 1
+        (pos, tile_type) = node_action
+        self._temp_world_state[*pos] = tile_type
+        self._tile_counts[tile_type] += 1
         self.update_open_nodes(*pos, is_reopening=False)
 
     def get_solution_state(self):

@@ -9,8 +9,7 @@ import hashlib
 
 TILE_DIGEST_SIZE = 4  # in bytes
 NP_ENCODED_TILE_TYPE = "longlong"
-WORLD_DIGEST_SIZE = 4
-
+# WORLD_DIGEST_SIZE = 4  # no longer used, python hash is used instead to encode action since order matters
 
 class WFC_Sample:
     """
@@ -23,6 +22,8 @@ class WFC_Sample:
     @staticmethod
     def tile_to_hash(tile):
         return int.from_bytes(hashlib.blake2b(tile.tobytes(), digest_size=TILE_DIGEST_SIZE).digest(), byteorder="big")
+        # TODO consider replacing w/ order dependant hash;
+        #   but likely requires additional changes, so will leave it like this for now
 
     def __init__(self, src_imgs, cell_width, cell_height):
         self.tile_data, self.super_tile_data, self.tile_dims = self.prepare(src_imgs[0], cell_width, cell_height)
@@ -407,10 +408,13 @@ class WFC_Problem(Problem):
         # TODO -> review formula... multiplication w/ entropy may be too strong for some rules;
         #           consider attenuating entropy on low temperatures or when adjusting freqs
         #         OR, consider some node to customize the costs later
-        costs = (1 - np.clip(probabilities
-                             + adjusted_freqs_diff * temp
-                             + (rands * 2 - 1) * temp
-                             , 0, 1))
+        if entropy == 0:
+            costs = 1 - probabilities  # "collapse"
+        else:
+            costs = (1 - np.clip(probabilities
+                             + adjusted_freqs_diff * temp * min(1, entropy)
+                             + (rands * 2 - 1) * temp * min(1, entropy)
+                             , 0.0001, 1))
 
         return tile_types, costs, entropy
 
@@ -560,12 +564,10 @@ class WFC_Problem(Problem):
             #    items = items[:take]
 
             for tile_type, cost in items:
-                world_state[y, x] = tile_type
-                world_state_hash = int.from_bytes(hashlib.blake2b(world_state.tobytes(), digest_size=4).digest(),
-                                                  byteorder="big")
-                world_state[y, x] = 0
-                yield Node(state=(depth + 1, world_state_hash),
-                           parent=node, action=((y, x), tile_type), node_cost=cost, extra=boundary_avg_entropy)
+                action = ((y, x), tile_type)
+                state = node.state[1] ^ hash(action)  # zobrist like
+                yield Node(state=(depth + 1, state), parent=node, action=action, node_cost=cost,
+                           extra=boundary_avg_entropy)
 
     def goal_test(self, state_node, goal_node=None):
         # state is not kept in each node, so the checks are done when closing a node.
@@ -588,7 +590,7 @@ class WFC_Problem(Problem):
 
         common_depth = 0
         for i in range(start_depth + 1)[::-1]:
-            if p_node.state == c_node.state:
+            if p_node.state == c_node.state:  # hashes may collide, so albeit rare, this may trigger an error later when updating open tiles
                 common_depth = i
                 break
             self.revert_action(p_node.action)

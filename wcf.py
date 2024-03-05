@@ -1,3 +1,4 @@
+import itertools
 from collections import defaultdict
 from functools import lru_cache, cache
 from multiprocessing.shared_memory import ShareableList
@@ -190,7 +191,7 @@ class WFC_Problem(Problem):
         # 2. initialize state to return instead of reverting last node actions
 
         # KEEP TRACK OF OPEN TILES ( yet to explore after the last closed node )
-        self._temp_world_open_super_tiles: set[tuple[int, int]] = set([])
+        self._temp_world_open_tiles: set[tuple[int, int]] = set([])
 
         # INFLUENCE COST WEIGHTS & FINAL NODE VALUE
         # influences the nodes' costs. high temperature lowers the influence of random noise and frequency adjustments
@@ -248,7 +249,7 @@ class WFC_Problem(Problem):
         @param is_reopening:
         @return:
         """
-        wost = self._temp_world_open_super_tiles
+        wost = self._temp_world_open_tiles
 
         indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
         if not self._use_8cardinals:
@@ -500,6 +501,7 @@ class WFC_Problem(Problem):
         """
         Generate all possible next states
         """
+
         if self._stop_and_ticker is not None and self._stop_and_ticker[0]:
             # print("")
             raise InterruptedError()
@@ -539,21 +541,39 @@ class WFC_Problem(Problem):
                 self._plateau_check_ticker = 0
                 self._prev_best_depth = self._best_node.depth()
 
-        iyxs = self._temp_world_open_super_tiles
-        potential_collapses = [self.get_cell_potential_states_and_costs(y, x, world_state, depth) for (y, x) in iyxs]
+        iyxs = self._temp_world_open_tiles
+
+        def takewhile_and_last(predicate, iterable):
+            last_element = None
+            for item in iterable:
+                if predicate(item):
+                    yield item
+                else:
+                    last_element = item
+                    break
+            if last_element is None:
+                return
+            yield last_element
+        potential_collapses_it = ( ((y, x), self.get_cell_potential_states_and_costs(y, x, world_state, depth)) for (y, x) in iyxs)
+        potential_collapses = list(takewhile_and_last(lambda x: x[1][2] is not None and x[1][2] > 0, potential_collapses_it))
+        # [ ( 0:(x, y) , 1:( 0:states, 1:costs, 2:entropy) ) ]
+
+        # check if last is impossible
+        if len(potential_collapses) == 0 or potential_collapses[-1][1][2] is None:
+            node.node_cost = float("inf")  # the node has now been closed, but it could help w/ debugging
+            return
+
+        # check if last element has entropy zero, if so, it should be the only one expanded ( a collapse )
+        if potential_collapses[-1][1][2] == 0:
+            potential_collapses = [potential_collapses[-1]]
 
         # print(f"depth = {depth:5,.0f}  |  temperature={self._min_temperature:5,.1f}  |  "
         #      f"freq_depth_adjustment={self._tile_freq_adjustment_func(depth):6,.2f}  |  "
         #      f"open tiles:{len(iyxs):5,.0f}    ", end="\r")
 
-        if len(potential_collapses) == 0 or any(counts is None for (_, counts, _) in potential_collapses):
-            # this state is impossible, so don't return any of its children
-            node.node_cost = float("inf")  # the node has now been closed, but it could help w/ debugging
-            return
+        boundary_avg_entropy = sum(e for _, (_, _, e) in potential_collapses)/len(potential_collapses)  # will be lagging by one state
 
-        boundary_avg_entropy = sum(e for _, _, e in potential_collapses)/len(potential_collapses)  # will be lagging by one state
-
-        for (y, x), (potential_states, costs, entropy) in zip(iyxs, potential_collapses):
+        for (y, x), (potential_states, costs, entropy) in potential_collapses:
             items = zip(potential_states, costs)
 
             # if self._temperature > xxx:  # TODO consider making this an option set by the user
@@ -612,7 +632,7 @@ class WFC_Problem(Problem):
     def open_nodes_on_depth_zero(self):
         if self._starting_state is None:
             # open center tile
-            self._temp_world_open_super_tiles.add((self._world_tdims[0] // 2, self._world_tdims[1] // 2))
+            self._temp_world_open_tiles.add((self._world_tdims[0] // 2, self._world_tdims[1] // 2))
             return
         # otherwise -> find all in starting state
 
@@ -620,7 +640,7 @@ class WFC_Problem(Problem):
         if not self._use_8cardinals:
             relative_indices_to_check = [relative_indices_to_check[i] for i in [1, 3, 4, 6]]
 
-        wost = self._temp_world_open_super_tiles
+        wost = self._temp_world_open_tiles
         for (y, x), tile in np.ndenumerate(self._starting_state):
             if tile != 0:
                 continue

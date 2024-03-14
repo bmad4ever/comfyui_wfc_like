@@ -115,3 +115,36 @@ To convert it to an image, use the *Decode (WFC)* node.
 It can also be used as input to other nodes for additional processing.
 
 </details>
+
+
+### Decode ; Encode ; and EmptyState 
+
+The *Generate* node uses a numeric representation of a tile, it does not use the tiles directly. These representations are kept in a *Sample* node's output *sample*. 
+
+- The *Decode (WFC)* node converts a state, i.e. a 2D matrix with these representations, into an image using the tiles stored in a given *sample*.
+
+    Incomplete states can also be converted into images. 
+Cells without any tile assigned are outputted with the color black; the mask output will be similar, but in reverse, having non-empty cells black and empty cells white.
+
+- The *Encode (WFC)* converts an image to a state, which can be passed to a *Generate* node.
+
+    Tiles not present in the *samples* are set as empty cells; the *Encode* node can encode partially complete states for a *Generate* node to fill the missing tiles.
+
+- The *EmptyState (WFC)* generates a state with the specified number of tiles specified by the `width` and `height` inputs. 
+
+
+### Filter
+
+Given a set of tiles, as an image batch - `tiles_batch`, sets all other tile types as empty cells in the provided `state`. Alternatively, if `reverse` is set to *True*, the same tile type cells are set to empty.
+
+Some potential applications:
+- Obtain a mask using a *Decode (WFC)* for inpainting.
+- Use different WFC samples at different semantic levels; e.g. generate a forest and some rivers; then, generate the forest details.
+- Attempt to patch problematic tiles; this is a workaround since there is no way to remove a specific tile from a *sample* in the current implementation.
+
+
+### GenParallel
+
+Similar to *Generate* node, however, different generations can be executed in parallel when using lists as inputs. 
+
+`max_parallel_tasks` defines the maximum number of generations that can run simultaneously.

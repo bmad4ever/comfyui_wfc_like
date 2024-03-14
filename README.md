@@ -145,6 +145,6 @@ Some potential applications:
 
 ### GenParallel
 
-Similar to *Generate* node, however, different generations can be executed in parallel when using lists as inputs. 
+Similar to *Generate* node, however, different generations can be executed in parallel when using lists as input. 
 
 `max_parallel_tasks` defines the maximum number of generations that can run simultaneously.

@@ -21,8 +21,9 @@ _______________________________________________________________________________
 
 - The custom nodes in this module require py_search, listed in the `requirement.txt` file.
 
-When using a portable release of comfyui, navigate to the python_embeded folder and using the cmd/terminal run:
-    `.\python -s -m pip install -r ..\ComfyUI\custom_nodes\comfyui_wfc_like\requirements.txt`.
+    When using a portable release of comfyui, navigate to the python_embeded folder and using the cmd/terminal run:
+            
+        `.\python -s -m pip install -r ..\ComfyUI\custom_nodes\comfyui_wfc_like\requirements.txt`.
 
 - `wfc.py` requires the use of **Python version 3.5 or higher** due to the use of [PEP 448 - Additional Unpacking Generalizations"](https://peps.python.org/pep-0448/).
 </details>

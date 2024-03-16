@@ -25,7 +25,7 @@ _______________________________________________________________________________
             
         .\python -s -m pip install -r ..\ComfyUI\custom_nodes\comfyui_wfc_like\requirements.txt
 
-- `wfc.py` requires the use of **Python version 3.5 or higher** due to the use of [PEP 448 - Additional Unpacking Generalizations"](https://peps.python.org/pep-0448/).
+- `wfc.py` requires the use of **Python version 3.5 or higher** due to the use of [PEP 448 - Additional Unpacking Generalizations](https://peps.python.org/pep-0448/).
 </details>
 
 _______________________________________________________________________________

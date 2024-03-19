@@ -278,6 +278,15 @@ def generate_single(stop_and_ticker_shm_name, i_kwargs, pid=0): #stop, ticker,
         return None
     except StopIteration:
         print("Exhausted all possibilities without finding a complete solution ; or some irregularity occurred.")
+    except KeyError:
+        print("\33[33m"
+              "[wfc_like] WARNING: search exited early due to a key error."
+              " This is likely caused by a hashcode collision; if this is a problem"
+              ", changing the seed will likely solve it."
+              " \33[0m")
+        # note that some collisions may not originate an error, and might even allow the return of an invalid state.
+        # such occurrences should be very rare though.
+
     result = problem.get_solution_state()
     return result
 

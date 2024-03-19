@@ -1,17 +1,38 @@
 # comfyui_wfc_like
-An "opinionated" Wave Function Collapse implementation with a set of nodes for comfyui
+An "opinionated" Wave Function Collapse implementation with a set of nodes for comfyui.
 
 <details>
-<summary>Important Technicality</summary>
+<summary>Usage and implementation clarifications</summary>
 <br>
-This implementation is not a pure-to-form implementation of the wave collapse algorithm.
 
-The “wave” of possibilities is not kept and updated on the entire grid; instead, only the boundary of the collapsed nodes is evaluated, expanding the boundary at each iteration, and validating only the states of cells adjacent to the expanded ones. In this sense, it would be fair to name it something else, since instead of a wave of possibilities the algorithm only satisfies local constraints until reaching an impossible state, at which point it backtracks. Nevertheless, the wave-function-collapse captures and helps clarify the potential applications of this algorithm.
+This implementation is not a pure-to-form implementation of the wave collapse algorithm. 
 
-In the spirit of being used as a visual tool, there is no way to specify global constraints, and all local constraints are inferred from the given samples.
+
+#### Rule specification
+**In the spirit of being used as a visual tool, there is no way to specify global constraints, and all local constraints are inferred from the given samples and can't be further refined.**
 Although this makes some sets of rules hard to specify, the envisioned application is not to arrive at a complete solution necessarily, but rather a partial one, which can be completed using diffusion. 
 
+
+#### No wave grid
+**In this implementation the “wave” of possibilities is not kept and updated on the entire grid; instead, only the boundary of the collapsed nodes is evaluated, expanding the boundary at each iteration, and validating only the states of cells adjacent to the expanded ones.**
+
+In light of this, it would be fair to name it something else, since instead of a wave of possibilities the algorithm only satisfies local constraints until reaching an impossible state, at which point it backtracks. Nevertheless, the wave-function-collapse captures and helps clarify the potential applications of this algorithm.
+
+#### Greedyish search with backtracking
 This implementation searches for possible states using a best-first search which also considers the node’s depth to make the search greedy towards already deep paths, speeding up the generation towards a partially acceptable state, i.e. a state that hasn’t collapsed all the cells but should be somewhat complete, provided the constraints are not very intricate. 
+
+#### States' hashcodes & potential problems
+
+The search nodes store a hashcode of the world state and the number of collapsed tiles.
+
+This information is not only used to prune the search but also for backtracking.
+
+**Instead of storing the complete state in each node to enable backtracking, stored actions are undone until a common ancestor node is found, i.e. nodes that share the same depth and hashcode.** 
+
+**Altought expected to be rare, it is possible when backtracking that two different states share the same depth and hashcode pair. 
+In such cases, the set of open tiles will mismatch the actual underlying state and the search may stop early due to a key error.** 
+There may also exist edge cases where no error is raised and a potentially invalid state is returned.
+
 </details>
 
 _______________________________________________________________________________

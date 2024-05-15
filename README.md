@@ -23,7 +23,7 @@ This implementation searches for possible states using a best-first search which
 
 #### States' hashcodes & potential problems
 
-The search nodes store a hashcode of the world state and the number of collapsed tiles.
+The search nodes store a hashcode of the world state and the number of collapsed tiles (depth).
 
 This information is not only used to prune the search but also for backtracking.
 

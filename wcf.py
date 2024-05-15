@@ -10,7 +10,7 @@ import hashlib
 
 TILE_DIGEST_SIZE = 4  # in bytes
 NP_ENCODED_TILE_TYPE = "longlong"
-# WORLD_DIGEST_SIZE = 4  # no longer used, python hash is used instead to encode action since order matters
+
 
 class WFC_Sample:
     """
@@ -23,8 +23,6 @@ class WFC_Sample:
     @staticmethod
     def tile_to_hash(tile):
         return int.from_bytes(hashlib.blake2b(tile.tobytes(), digest_size=TILE_DIGEST_SIZE).digest(), byteorder="big")
-        # TODO consider replacing w/ order dependant hash;
-        #   but likely requires additional changes, so will leave it like this for now
 
     def __init__(self, src_imgs, cell_width, cell_height):
         self.tile_data, self.super_tile_data, self.tile_dims = self.prepare(src_imgs[0], cell_width, cell_height)
@@ -72,9 +70,10 @@ class WFC_Sample:
 
         height_in_tiles = round(img.shape[0] / tile_height)
         width_in_tiles = round(img.shape[1] / tile_width)
+        assert height_in_tiles >= 3 and width_in_tiles >= 3, "sample too small to infer adjacency rules."
+
         new_height = tile_height * height_in_tiles
         new_width = tile_width * width_in_tiles
-
         adjusted_image = cv.resize(img, (new_width, new_height)) if new_height != img.shape[0] or new_width != \
                                                                     img.shape[1] else img.copy()
 

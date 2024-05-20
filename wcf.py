@@ -337,7 +337,7 @@ class WFC_Problem(Problem):
                             max(0, wx - 2):min(world_state.shape[1], wx + 3)], (
                                 (max(2 - wy, 0), max(wy + 3 - world_state.shape[0], 0)),
                                 (max(2 - wx, 0), max(wx + 3 - world_state.shape[1], 0))), constant_values=0)
-        assert roi_matrix.shape[0] == 5 and roi_matrix.shape[1] == 5
+        #assert roi_matrix.shape[0] == 5 and roi_matrix.shape[1] == 5, "roi matrix should be a 5x5 matrix"
 
         def check_if_all_adjacent_tiles_remain_valid_v2(tile_type):
             roi_matrix[2, 2] = tile_type  # simulate tile placement
@@ -377,9 +377,9 @@ class WFC_Problem(Problem):
                                                       world_indices_to_check, y, x)
 
         # using the stored sample counts, compute each tile type probability
-        tile_types, probabilities = self.map_to_probabilities(potential_tiles_data)
+        tile_types, probabilities = self.map_to_probabilities(potential_tiles_data) or ([], None)
 
-        if len(tile_types) == 0:
+        if probabilities is None:
             return [], None, None  # nothing to compute, so just return early
 
         # generate random weights and temperature
@@ -392,29 +392,26 @@ class WFC_Problem(Problem):
         current_counts = np.array([self._tile_counts[t] for t in tile_types])
         current_freqs = current_counts / max(1, depth)
 
-        if self._max_freq_adjust == 0.0:
+        if np.isclose(self._max_freq_adjust, 0.0, rtol=0.0, atol=1.e-8):
             adjusted_freqs_diff = np.zeros(probabilities.size)
         else:
             depth_adjustment = self._tile_freq_adjustment_func(depth)
             adjusted_freqs_diff = np.sign(sample_freqs - current_freqs) * (
                     1 - np.minimum(sample_freqs, current_freqs) / np.maximum(sample_freqs, current_freqs))
             adjusted_freqs_diff *= depth_adjustment
-        # ===========================================================================
-        entropy: float = - np.sum(probabilities * np.log2(probabilities)) if len(
-            probabilities) > 1 else 0
-        #normalized_entropy: float = - np.sum(probabilities * np.log2(probabilities)) / np.log2(len(probabilities)) if len(
-        #    probabilities) > 1 else 0  # the original used, which was multiplied w/ the cost
 
-        # TODO -> review formula... multiplication w/ entropy may be too strong for some rules;
-        #           consider attenuating entropy on low temperatures or when adjusting freqs
-        #         OR, consider some node to customize the costs later
-        if entropy == 0:
-            costs = 1 - probabilities  # "collapse"
+        # compute entropy and node costs
+        if len(probabilities) == 1:
+            # collapse -> only one possibility
+            entropy = 0.0
+            costs = 1 - probabilities
         else:
+            entropy = - np.sum(probabilities * np.log2(probabilities))
+            normalized_entropy = min(1.0, entropy / np.log2(len(probabilities)))
             costs = (1 - np.clip(probabilities
-                             + adjusted_freqs_diff * temp * min(1, entropy)
-                             + (rands * 2 - 1) * temp * min(1, entropy)
-                             , 0.0001, 1))
+                                 + adjusted_freqs_diff * temp * normalized_entropy
+                                 + (rands * 2 - 1) * temp * normalized_entropy
+                                 , 0.0001, 1))
 
         return tile_types, costs, entropy
 
@@ -470,30 +467,35 @@ class WFC_Problem(Problem):
 
         return pcs
 
-    def map_to_probabilities(self, pcs):
-        if len(pcs) == 0:
-            return [], []
-        # compute probabilities for each possible state
-        counts = list(pcs.values())
-        total_counts: float = sum(counts)
-        probabilities: ndarray = np.array(counts).astype(np.float32) / total_counts
-        assert np.sum(probabilities > 1) == 0  # seems fine
-        return pcs.keys(), probabilities
+    @staticmethod
+    def map_to_probabilities(pcs: dict[int, int]) -> tuple[list[int], ndarray] | None:
+        """
+        @param pcs: Dict[ key->tile_type, value->count ]  obtained from get_cell_potential_states_Xcardinals.
+        @return: Tuple[ keys-> tile types, value-> probability ], where probability is normalized [0, 1].
+            If pcs is empty then returns None, None
+        """
+        if not pcs:
+            return None
+
+        counts = np.array(list(pcs.values()), dtype=np.float32)
+        probabilities = counts / counts.sum()
+
+        #assert (probabilities <= 1).all(), "Probabilities must be less than or equal to 1"
+
+        return list(pcs.keys()), probabilities
 
     def node_value(self, node: Node):
-        """
-        The function used to compute the value of a node.
-        """
-        rev_depth = (1 + self._number_of_tiles_to_process - node.depth())
-        # can be used to prioritize nodes w/ high depth, for a quicker generation
+        return (
+                # depth: can be used to prioritize nodes w/ high depth for a quicker generation
+                (1 + self._number_of_tiles_to_process - node.depth()) * self._rev_depth_w +
 
-        node_cost = node.cost()
-        # if temperature is high, this is the most promising locally
+                # cost: if temperature is high, this is the most promising locally,
+                # otherwise it can be somewhat random or steer the generation towards the sample's frequencies
+                node.cost() * self._node_cost_w +
 
-        prev_node_boundary_avg_entropy = node.extra
-        # how "fuzzy" is the boundary ( unsure if useful )
-
-        return rev_depth * self._rev_depth_w + node_cost * self._node_cost_w + prev_node_boundary_avg_entropy * self._ps_avg_ent_w
+                # extra: how "fuzzy" is the boundary ( unsure if useful )
+                node.extra * self._ps_avg_ent_w
+        )
 
     def successors(self, node):
         from py_search.base import Node

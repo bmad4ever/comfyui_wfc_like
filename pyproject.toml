@@ -1,0 +1,15 @@
+[project]
+name = "comfyui_wfc_like"
+description = "An 'opinionated' Wave Function Collapse implementation with a set of nodes for comfyui"
+version = "1.0.0"
+license = "LICENSE"
+dependencies = ["py_search"]
+
+[project.urls]
+Repository = "https://github.com/bmad4ever/comfyui_wfc_like"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "comfyui_wfc_like"
+Icon = ""

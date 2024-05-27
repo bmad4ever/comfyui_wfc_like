@@ -1,8 +1,9 @@
+import numpy as np
 from _operator import xor
 from threading import Event, Thread
 from py_search.informed import best_first_search
 from comfy import utils
-from .wcf import *
+from .wcf import WFC_Sample, WFC_Problem, ShareableList, ndarray
 
 
 def waiting_loop(abort_loop_event: Event, pbar: utils.ProgressBar, total_steps, shm_name, ntasks=1):
@@ -40,7 +41,7 @@ def terminate_generation(finished_event, shm_list, pbt: Thread):
 
 class WFC_SampleNode:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -95,8 +96,8 @@ class WFC_GenerateNode:
         }
 
     @classmethod
-    def INPUT_TYPES(s):
-        return s.NODE_INPUT_TYPES()
+    def INPUT_TYPES(cls):
+        return cls.NODE_INPUT_TYPES()
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state", "unique_tiles",)
@@ -133,7 +134,7 @@ class WFC_GenerateNode:
 
 class WFC_Encode:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -155,7 +156,7 @@ class WFC_Encode:
 
 class WFC_Decode:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -179,7 +180,7 @@ class WFC_Decode:
 
 class WFC_CustomTemperature:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -200,7 +201,7 @@ class WFC_CustomTemperature:
 
 class WFC_CustomValueWeights:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -221,7 +222,7 @@ class WFC_CustomValueWeights:
 
 class WFC_EmptyState:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -241,7 +242,7 @@ class WFC_EmptyState:
 
 class WFC_Filter:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required":
                 {
@@ -294,7 +295,7 @@ def generate_single(stop_and_ticker_shm_name, i_kwargs, pid=0): #stop, ticker,
 
 class WFC_GenParallel:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         gen_types = WFC_GenerateNode.NODE_INPUT_TYPES()
         gen_types["required"]["max_parallel_tasks"] = ("INT", {"default": 4, "min": 1, "max": 32})
         return gen_types

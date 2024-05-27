@@ -1,9 +1,7 @@
-import itertools
 from collections import defaultdict
 from functools import lru_cache, cache
 from multiprocessing.shared_memory import ShareableList
 import numpy as np
-import cv2 as cv
 from numpy import ndarray
 from py_search.base import Problem, Node
 import hashlib
@@ -64,18 +62,18 @@ class WFC_Sample:
         @return: the adjusted image, height in number of cells, and width
         """
         if img.shape[0] % tile_height != 0:
-            print(f"src height is not divisible by cell_height!")
+            print(f"src height ({img.shape[0]}) is not divisible by cell_height ({tile_height})!")
         if img.shape[1] % tile_width != 0:
-            print(f"src width is not divisible by cell_height!")
+            print(f"src width ({img.shape[1]}) is not divisible by cell_height ({tile_width})!")
 
-        height_in_tiles = round(img.shape[0] / tile_height)
-        width_in_tiles = round(img.shape[1] / tile_width)
+        height_in_tiles = img.shape[0] // tile_height
+        width_in_tiles = img.shape[1] // tile_width
         assert height_in_tiles >= 3 and width_in_tiles >= 3, "sample too small to infer adjacency rules."
 
         new_height = tile_height * height_in_tiles
-        new_width = tile_width * width_in_tiles
-        adjusted_image = cv.resize(img, (new_width, new_height)) if new_height != img.shape[0] or new_width != \
-                                                                    img.shape[1] else img.copy()
+        new_width  = tile_width * width_in_tiles
+        adjusted_image = img.copy()[0:new_height, 0:new_width, :]
+        print(adjusted_image.shape)
 
         return adjusted_image, height_in_tiles, width_in_tiles
 
@@ -150,7 +148,7 @@ class WFC_Problem(Problem):
         @param sample: contains the tiles, their frequencies and "implicit" constraints
         @param starting_state: complete the provided state instead of starting with an empty world.
                                 If provided, width and height are ignored.
-        @param seed: used to setup the generator so that the result can be reproducible ( deterministic )
+        @param seed: used to set up the generator so that the result can be reproducible ( deterministic )
         @param use_8_cardinals: consider the surrounding 8 tiles if set to TRUE; OR only the 4 cardinals if set to FALSE
         @param max_freq_adjust: scale frequency adjustment weight.
                                 if set to zero, the frequency of the tiles registered in the given samples is ignored.
@@ -164,6 +162,10 @@ class WFC_Problem(Problem):
         @param reverse_depth_w:
         @param node_cost_w:
         @param prev_state_avg_entropy_w:
+
+        @param stop_and_ticker_shm_list: shared memory list.
+                                        element at index=0 indicates whether to execution as been canceled or not.
+                                        elements at index>1 will store the best depth for each of the generations.
         """
         super().__init__(initial=(0, 0), initial_cost=0, extra=0)
         # initial state -> (depth, hash) -> 0 represents empty world at the start, at zero depth
@@ -224,6 +226,9 @@ class WFC_Problem(Problem):
         b = [t, t, 0]
         self._tile_freq_adjustment_poly = np.poly1d(np.linalg.solve(a, b))
 
+    def is_generation_aborted(self) -> bool:
+        return self._stop_and_ticker is not None and self._stop_and_ticker[0]
+
     @lru_cache(maxsize=8)
     def temp_ratio(self, node_depth: int, prior_node_depth: int):
         # TODO -> potentially something to change/customize
@@ -242,47 +247,88 @@ class WFC_Problem(Problem):
     def _tile_freq_adjustment_func(self, depth):
         return self._max_freq_adjust * (1 - self._tile_freq_adjustment_poly(depth) / self._number_of_tiles_to_process)
 
-    def update_open_nodes(self, y, x, is_reopening):
+    def adjacent_tiles_coords(self, tile_y: int, tile_x: int, get_diagonals: bool) -> list[tuple[int, int]]:
         """
-        Update open nodes when updating world state
-        @param is_reopening:
-        @return:
+        @param get_diagonals: also return diagonally adjacent tiles?
+        @return: a list of tuple pairs with the coordinates of the tiles adjacent to the input tile
         """
-        wost = self._temp_world_open_tiles
+        # pre-calculate bounds
+        min_y = max(0, tile_y - 1)
+        max_y = min(self._temp_world_state.shape[0], tile_y + 1)
+        min_x = max(0, tile_x - 1)
+        max_x = min(self._temp_world_state.shape[1], tile_x + 1)
 
-        indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
-        if not self._use_8cardinals:
-            indices_to_check = [indices_to_check[i] for i in [1, 3, 4, 6]]
-        indices_to_check = [(_y, _x) for (_y, _x) in indices_to_check
-                            if 0 <= _y < self._temp_world_state.shape[0] and 0 <= _x < self._temp_world_state.shape[1]]
+        return [(adj_y, adj_x) for adj_y in range(min_y, max_y + 1)
+                for adj_x in range(min_x, max_x + 1)
+                if (adj_y, adj_x) != (tile_y, tile_x)
+                and (get_diagonals or (adj_y == tile_y or adj_x == tile_x))
+                ]
 
-        if is_reopening:
-            wost.add((y, x))
+    @property
+    @cache
+    def _3x3_adjacency_kernel(self):
+        kernel = np.ones((3, 3)) if self._use_8cardinals else np.array([0, 1, 0, 1, 1, 1, 0, 1, 0]).reshape((3, 3))
+        kernel[1, 1] = 0
+        return kernel
 
-            for (_y, _x) in indices_to_check:
-                if not wost.__contains__((_y, _x)):
-                    continue
+    @staticmethod
+    def get_5x5_roi(world_state, wx, wy):
+        """
+        5x5 matrix that is a window into a subsection of the world_state matrix.
+        The window is centered at the (wy, wx) coordinates in the world_state.
+        Out of bounds cells are set with zeroes.
+        """
+        return np.pad(world_state[max(0, wy - 2):min(world_state.shape[0], wy + 3),
+                      max(0, wx - 2):min(world_state.shape[1], wx + 3)], (
+                          (max(2 - wy, 0), max(wy + 3 - world_state.shape[0], 0)),
+                          (max(2 - wx, 0), max(wx + 3 - world_state.shape[1], 0))), constant_values=0)
 
-                sub_indices_to_check = [(_y - 1 + __y, _x - 1 + __x) for __y in range(3)
-                                        for __x in range(3)]
-                if not self._use_8cardinals:
-                    sub_indices_to_check = [sub_indices_to_check[i] for i in [1, 3, 5, 7]]
-                sub_indices_to_check = [(__y, __x) for (__y, __x) in sub_indices_to_check
-                                        if 0 <= __y < self._temp_world_state.shape[0] and 0 <= __x <
-                                        self._temp_world_state.shape[1]]
-
-                if any(self._temp_world_state[__y, __x] != 0 for (__y, __x) in sub_indices_to_check):
-                    continue  # -> position should remain open
-                # otherwise -> position should be closed
-                wost.remove((_y, _x))
-
-            return
-
-        # otherwise -> closing
-        wost.remove((y, x))
+    def close_node(self, y: int, x: int):
+        indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
+        self._temp_world_open_tiles.remove((y, x))
         for _y, _x in indices_to_check:
             if self._temp_world_state[_y, _x] == 0:
-                wost.add((_y, _x))
+                self._temp_world_open_tiles.add((_y, _x))
+
+    def reopen_node(self, y: int, x: int):
+        indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
+        self._temp_world_open_tiles.add((y, x))
+        for (_y, _x) in indices_to_check:
+            if not self._temp_world_open_tiles.__contains__((_y, _x)):
+                continue
+            sub_indices_to_check = self.adjacent_tiles_coords(_y, _x, self._use_8cardinals)
+            if any(self._temp_world_state[__y, __x] != 0 for (__y, __x) in sub_indices_to_check):
+                continue  # -> position should remain open
+            # otherwise -> position should be closed
+            self._temp_world_open_tiles.remove((_y, _x))
+
+    def reopen_node_v2(self, y: int, x: int):
+        """
+        NOT USED FOR NOW. Might slightly improve performance.
+        """
+        from scipy.signal import convolve2d
+
+        self._temp_world_open_tiles.add((y, x))
+
+        # use convolution to check adjacency
+        kernel = self._3x3_adjacency_kernel
+        window_5x5 = self._temp_world_state[max(0, y - 2):min(y + 3, self._temp_world_state.shape[0]),
+                     max(0, x - 2):min(x + 3, self._temp_world_state.shape[1])]
+        conv_matrix = convolve2d(window_5x5, kernel, mode='valid')
+
+        for i in range(conv_matrix.shape[0]):
+            _y = max(1, y - 1) + i
+            for j in range(conv_matrix.shape[1]):
+                _x = max(1, x - 1) + j
+                if (
+                        # ugly, but using np.argwhere to build indices seems slower
+                        (_y == y and _x == x)
+                        or not self._temp_world_open_tiles.__contains__((_y, _x))
+                        or (not self._use_8cardinals and kernel[_y - y + 1, _x - x + 1] == 0)
+                        or conv_matrix[i, j] > 0
+                ):
+                    continue
+                self._temp_world_open_tiles.remove((_y, _x))
 
     @cache
     def tile_remains_valid_4cardinals(self, p2, p4, p5, p6, p8):
@@ -291,10 +337,9 @@ class WFC_Problem(Problem):
 
         def is_possible(super_tile):
             return not (super_tile[1, 1] != p5
-                        or p2 != 0 and super_tile[0, 1] != p2
-                        or p4 != 0 and super_tile[1, 0] != p4
-                        or p6 != 0 and super_tile[1, 2] != p6
-                        or p8 != 0 and super_tile[2, 1] != p8)
+                        or p2 != 0 and super_tile[0, 1] != p2 or p4 != 0 and super_tile[1, 0] != p4
+                        or p6 != 0 and super_tile[1, 2] != p6 or p8 != 0 and super_tile[2, 1] != p8
+                        )
 
         return any(is_possible(stile) for stile, _ in super_tile_data)
 
@@ -304,14 +349,10 @@ class WFC_Problem(Problem):
 
         def is_possible(super_tile):
             return not (super_tile[1, 1] != p5
-                        or p1 != 0 and super_tile[0, 0] != p1
-                        or p2 != 0 and super_tile[0, 1] != p2
-                        or p3 != 0 and super_tile[0, 2] != p3
-                        or p4 != 0 and super_tile[1, 0] != p4
-                        or p6 != 0 and super_tile[1, 2] != p6
-                        or p7 != 0 and super_tile[2, 0] != p7
-                        or p8 != 0 and super_tile[2, 1] != p8
-                        or p9 != 0 and super_tile[2, 2] != p9
+                        or p1 != 0 and super_tile[0, 0] != p1 or p2 != 0 and super_tile[0, 1] != p2
+                        or p3 != 0 and super_tile[0, 2] != p3 or p4 != 0 and super_tile[1, 0] != p4
+                        or p6 != 0 and super_tile[1, 2] != p6 or p7 != 0 and super_tile[2, 0] != p7
+                        or p8 != 0 and super_tile[2, 1] != p8 or p9 != 0 and super_tile[2, 2] != p9
                         )
 
         return any(is_possible(stile) for stile, _ in super_tile_data)
@@ -330,14 +371,7 @@ class WFC_Problem(Problem):
         if len(tile_data) == 0:
             return {}
 
-        # create a 5x5 matrix with all the required data; out of bounds is set to zero
-        #  * both out of bounds & not filled are set to zero, so there is only one condition to check
-        #  * using an aux matrix might improve data locality ( long shot; copium, most likely ... )
-        roi_matrix = np.pad(world_state[max(0, wy - 2):min(world_state.shape[0], wy + 3),
-                            max(0, wx - 2):min(world_state.shape[1], wx + 3)], (
-                                (max(2 - wy, 0), max(wy + 3 - world_state.shape[0], 0)),
-                                (max(2 - wx, 0), max(wx + 3 - world_state.shape[1], 0))), constant_values=0)
-        #assert roi_matrix.shape[0] == 5 and roi_matrix.shape[1] == 5, "roi matrix should be a 5x5 matrix"
+        roi_matrix = self.get_5x5_roi(world_state, wx, wy)
 
         def check_if_all_adjacent_tiles_remain_valid_v2(tile_type):
             roi_matrix[2, 2] = tile_type  # simulate tile placement
@@ -361,6 +395,7 @@ class WFC_Problem(Problem):
         new_tile_data = {k: c for k, c in tile_data.items() if check_if_all_adjacent_tiles_remain_valid_v2(k)}
         return new_tile_data
 
+
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
         world_indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
@@ -374,7 +409,7 @@ class WFC_Problem(Problem):
         # check if adjacent, non-empty tiles, remain valid; if not, remove potential tile
         if not self._relaxed_validation:
             potential_tiles_data = self.validate_adjacent(potential_tiles_data, world_state,
-                                                      world_indices_to_check, y, x)
+                                                          world_indices_to_check, y, x)
 
         # using the stored sample counts, compute each tile type probability
         tile_types, probabilities = self.map_to_probabilities(potential_tiles_data) or ([], None)
@@ -480,13 +515,13 @@ class WFC_Problem(Problem):
         counts = np.array(list(pcs.values()), dtype=np.float32)
         probabilities = counts / counts.sum()
 
-        #assert (probabilities <= 1).all(), "Probabilities must be less than or equal to 1"
+        # assert (probabilities <= 1).all(), "Probabilities must be less than or equal to 1"
 
         return list(pcs.keys()), probabilities
 
     def node_value(self, node: Node):
         return (
-                # depth: can be used to prioritize nodes w/ high depth for a quicker generation
+            # depth: can be used to prioritize nodes w/ high depth for a quicker generation
                 (1 + self._number_of_tiles_to_process - node.depth()) * self._rev_depth_w +
 
                 # cost: if temperature is high, this is the most promising locally,
@@ -503,8 +538,7 @@ class WFC_Problem(Problem):
         Generate all possible next states
         """
 
-        if self._stop_and_ticker is not None and self._stop_and_ticker[0]:
-            # print("")
+        if self.is_generation_aborted():
             raise InterruptedError()
 
         # world state is kept in self._temp_world_state; updated here when closing the node.
@@ -513,18 +547,17 @@ class WFC_Problem(Problem):
         if node.depth() == 0:
             self._best_node = node
             self.open_nodes_on_depth_zero()
-            self._last_node = node
             world_state = self._temp_world_state
         else:
             world_state = self.get_world_state(self._last_node, node)
             self._min_temperature = self.get_new_temperature(node.depth(), self._last_node.depth())
-            self._last_node = node
+        self._last_node = node
 
         depth = node.depth()
         if depth > self._best_node.depth():
             self._best_node = node
             if self._stop_and_ticker is not None:
-                self._stop_and_ticker[1+self._pid] += 1
+                self._stop_and_ticker[1 + self._pid] += 1
         if depth >= self._number_of_tiles_to_process:
             self._stop = True
             print("\nEnded search with all tiles filled.")
@@ -537,7 +570,8 @@ class WFC_Problem(Problem):
                     self._stop = True
                     print("\nEnded due to depth plateauing.")
                     if self._stop_and_ticker is not None:
-                        self._stop_and_ticker[1+self._pid] += self._number_of_tiles_to_process - self._best_node.depth()
+                        self._stop_and_ticker[
+                            1 + self._pid] += self._number_of_tiles_to_process - self._best_node.depth()
                     return
                 self._plateau_check_ticker = 0
                 self._prev_best_depth = self._best_node.depth()
@@ -555,8 +589,11 @@ class WFC_Problem(Problem):
             if last_element is None:
                 return
             yield last_element
-        potential_collapses_it = ( ((y, x), self.get_cell_potential_states_and_costs(y, x, world_state, depth)) for (y, x) in iyxs)
-        potential_collapses = list(takewhile_and_last(lambda x: x[1][2] is not None and x[1][2] > 0, potential_collapses_it))
+
+        potential_collapses_it = (((y, x), self.get_cell_potential_states_and_costs(y, x, world_state, depth)) for
+                                  (y, x) in iyxs)
+        potential_collapses = list(
+            takewhile_and_last(lambda x: x[1][2] is not None and x[1][2] > 0, potential_collapses_it))
         # [ ( 0:(x, y) , 1:( 0:states, 1:costs, 2:entropy) ) ]
 
         # check if last is impossible
@@ -572,7 +609,8 @@ class WFC_Problem(Problem):
         #      f"freq_depth_adjustment={self._tile_freq_adjustment_func(depth):6,.2f}  |  "
         #      f"open tiles:{len(iyxs):5,.0f}    ", end="\r")
 
-        boundary_avg_entropy = sum(e for _, (_, _, e) in potential_collapses)/len(potential_collapses)  # will be lagging by one state
+        boundary_avg_entropy = sum(e for _, (_, _, e) in potential_collapses) / len(
+            potential_collapses)  # will be lagging by one state
 
         for (y, x), (potential_states, costs, entropy) in potential_collapses:
             items = zip(potential_states, costs)
@@ -656,19 +694,19 @@ class WFC_Problem(Problem):
         (pos, tile_type) = node_action
         self._tile_counts[self._temp_world_state[*pos]] -= 1
         self._temp_world_state[*pos] = 0
-        self.update_open_nodes(*pos, is_reopening=True)
+        self.reopen_node(*pos)
 
     def apply_action(self, node_action):
         (pos, tile_type) = node_action
         self._temp_world_state[*pos] = tile_type
         self._tile_counts[tile_type] += 1
-        self.update_open_nodes(*pos, is_reopening=False)
+        self.close_node(*pos)
 
     def get_solution_state(self):
         node: Node = self._best_node
         encoded_state = np.zeros(self._temp_world_state.shape[:2]) if self._starting_state is None \
             else self._starting_state.copy()
-        for d in range(node.depth()):
+        for _ in range(node.depth()):
             (y, x), tile_hash = node.action
             node = node.parent
             if tile_hash != 0:

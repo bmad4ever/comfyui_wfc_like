@@ -71,7 +71,7 @@ class WFC_Sample:
         assert height_in_tiles >= 3 and width_in_tiles >= 3, "sample too small to infer adjacency rules."
 
         new_height = tile_height * height_in_tiles
-        new_width  = tile_width * width_in_tiles
+        new_width = tile_width * width_in_tiles
         adjusted_image = img.copy()[0:new_height, 0:new_width, :]
 
         return adjusted_image, height_in_tiles, width_in_tiles
@@ -212,8 +212,8 @@ class WFC_Problem(Problem):
         # OTHERS
         self._use_8cardinals = use_8_cardinals
         self.get_cell_potential_states = \
-            self.get_cell_potential_states_8cardinals if use_8_cardinals\
-            else self.get_cell_potential_states_4cardinals
+            self.get_cell_potential_states_8cardinals if use_8_cardinals \
+                else self.get_cell_potential_states_4cardinals
 
         tile_data = sample.get_tile_data()
         self._tile_counts = dict(zip(tile_data.keys(), [0] * len(tile_data)))
@@ -249,37 +249,31 @@ class WFC_Problem(Problem):
     def _tile_freq_adjustment_func(self, depth):
         return self._max_freq_adjust * (1 - self._tile_freq_adjustment_poly(depth) / self._number_of_tiles_to_process)
 
-    def adjacent_tiles_coords(self, tile_y: int, tile_x: int, get_diagonals: bool) -> list[tuple[int, int]]:
+    @lru_cache(maxsize=32)
+    def _cached_adjacent_tiles_coords(self, tile_y: int, tile_x: int) -> list[tuple[int, int]]:
         """
-        @param get_diagonals: also return diagonally adjacent tiles?
+        Will also fetch the diagonal adjacent tiles if _use_8cardinals is set to true.
         @return: a list of tuple pairs with the coordinates of the tiles adjacent to the input tile
+                 out of bounds "tiles" coordinates are also returned.
         """
-        # pre-calculate bounds
-        min_y = max(0, tile_y - 1)
-        max_y = min(self._temp_world_state.shape[0] - 1, tile_y + 1)
-        min_x = max(0, tile_x - 1)
-        max_x = min(self._temp_world_state.shape[1] - 1, tile_x + 1)
-
-        return [(adj_y, adj_x) for adj_y in range(min_y, max_y + 1)
-                for adj_x in range(min_x, max_x + 1)
-                if (adj_y, adj_x) != (tile_y, tile_x)
-                and (get_diagonals or (adj_y == tile_y or adj_x == tile_x))
-                ]
-
-    def adjacent_tiles_coords_with_outbounds(self, tile_y: int, tile_x: int, get_diagonals: bool) -> list[tuple[int, int]]:
-        """
-        @param get_diagonals: also return diagonally adjacent tiles?
-        @return: a list of tuple pairs with the coordinates of the tiles adjacent to the input tile
-        """
-        return [(adj_y, adj_x) if
-                0 <= adj_y < self._temp_world_state.shape[0] and
-                0 <= adj_x < self._temp_world_state.shape[1]
-                else None
-                for adj_y in range(tile_y - 1, tile_y + 2)
+        return [(adj_y, adj_x) for adj_y in range(tile_y - 1, tile_y + 2)
                 for adj_x in range(tile_x - 1, tile_x + 2)
                 if (adj_y, adj_x) != (tile_y, tile_x)
-                and (get_diagonals or (adj_y == tile_y or adj_x == tile_x))
+                and (self._use_8cardinals or (adj_y == tile_y or adj_x == tile_x))
                 ]
+
+    def _within_world_bounds(self, tile_y, tile_x):
+        return 0 <= tile_y < self._temp_world_state.shape[0] and 0 <= tile_x < self._temp_world_state.shape[1]
+
+    def adjacent_tiles_coords(self, tile_y: int, tile_x: int, exc_out: bool = True) -> list[tuple[int, int]]:
+        """
+        @param exc_out: exclude indices outside the world bounds?
+        @return: a list of tuple pairs with the coordinates of the tiles adjacent to the input tile
+        """
+        adjacent_idx = self._cached_adjacent_tiles_coords(tile_y, tile_x)
+        if exc_out:
+            return [idx for idx in adjacent_idx if self._within_world_bounds(*idx)]
+        return adjacent_idx
 
     @property
     @cache
@@ -301,19 +295,19 @@ class WFC_Problem(Problem):
                           (max(2 - wx, 0), max(wx + 3 - world_state.shape[1], 0))), constant_values=0)
 
     def close_node(self, y: int, x: int):
-        indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
+        indices_to_check = self.adjacent_tiles_coords(y, x, exc_out=True)
         self._temp_world_open_tiles.remove((y, x))
         for _y, _x in indices_to_check:
             if self._temp_world_state[_y, _x] == 0:
                 self._temp_world_open_tiles.add((_y, _x))
 
     def reopen_node(self, y: int, x: int):
-        indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
+        indices_to_check = self.adjacent_tiles_coords(y, x, exc_out=True)
         self._temp_world_open_tiles.add((y, x))
         for (_y, _x) in indices_to_check:
             if not self._temp_world_open_tiles.__contains__((_y, _x)):
                 continue
-            sub_indices_to_check = self.adjacent_tiles_coords(_y, _x, self._use_8cardinals)
+            sub_indices_to_check = self.adjacent_tiles_coords(_y, _x, exc_out=True)
             if any(self._temp_world_state[__y, __x] != 0 for (__y, __x) in sub_indices_to_check):
                 continue  # -> position should remain open
             # otherwise -> position should be closed
@@ -412,20 +406,27 @@ class WFC_Problem(Problem):
         new_tile_data = {k: c for k, c in tile_data.items() if check_if_all_adjacent_tiles_remain_valid_v2(k)}
         return new_tile_data
 
+    def get_adjacent(self, y, x, world_state) -> tuple[list[tuple[int, int]], list[int]]:
+        indices = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3)
+                   if _y != 1 or _x != 1
+                   and self._use_8cardinals or (y == 1 and x == 1)
+                   ]
+        states = [world_state[_y, _x]
+                  if 0 <= _y < world_state.shape[0] and 0 <= _x < world_state.shape[1]
+                  else 0 for (_y, _x) in indices]
+        return indices, states
 
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
-        # get adjacents' (y,x) coordinates. if out of bounds get a None instead.
-        adjacent_indices = self.adjacent_tiles_coords_with_outbounds(y, x, self._use_8cardinals)
-        # build adjacency setting outbounds as zeroes.
-        adjacent_states = [0 if idx is None else world_state[idx[0], idx[1]] for idx in adjacent_indices]
+        adjacent_indices = self.adjacent_tiles_coords(y, x, exc_out=False)
+        adjacent_states = [0 if not self._within_world_bounds(*idx)
+                           else world_state[idx[0], idx[1]]
+                           for idx in adjacent_indices]
         potential_tiles_data = self.get_cell_potential_states(*adjacent_states)  # must be given in correct order
 
         # check if adjacent, non-empty tiles, remain valid; if not, remove potential tile
         if not self._relaxed_validation:
-            adjacent_indices = [idx for idx in adjacent_indices if idx is not None]  # get rid of out of bounds items
-            potential_tiles_data = self.validate_adjacent(potential_tiles_data, world_state,
-                                                          adjacent_indices, y, x)
+            potential_tiles_data = self.validate_adjacent(potential_tiles_data, world_state, adjacent_indices, y, x)
 
         # using the stored sample counts, compute each tile type probability
         tile_types, probabilities = self.map_to_probabilities(potential_tiles_data) or ([], None)

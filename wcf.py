@@ -256,12 +256,27 @@ class WFC_Problem(Problem):
         """
         # pre-calculate bounds
         min_y = max(0, tile_y - 1)
-        max_y = min(self._temp_world_state.shape[0], tile_y + 1)
+        max_y = min(self._temp_world_state.shape[0] - 1, tile_y + 1)
         min_x = max(0, tile_x - 1)
-        max_x = min(self._temp_world_state.shape[1], tile_x + 1)
+        max_x = min(self._temp_world_state.shape[1] - 1, tile_x + 1)
 
         return [(adj_y, adj_x) for adj_y in range(min_y, max_y + 1)
                 for adj_x in range(min_x, max_x + 1)
+                if (adj_y, adj_x) != (tile_y, tile_x)
+                and (get_diagonals or (adj_y == tile_y or adj_x == tile_x))
+                ]
+
+    def adjacent_tiles_coords_with_outbounds(self, tile_y: int, tile_x: int, get_diagonals: bool) -> list[tuple[int, int]]:
+        """
+        @param get_diagonals: also return diagonally adjacent tiles?
+        @return: a list of tuple pairs with the coordinates of the tiles adjacent to the input tile
+        """
+        return [(adj_y, adj_x) if
+                0 <= adj_y < self._temp_world_state.shape[0] and
+                0 <= adj_x < self._temp_world_state.shape[1]
+                else None
+                for adj_y in range(tile_y - 1, tile_y + 2)
+                for adj_x in range(tile_x - 1, tile_x + 2)
                 if (adj_y, adj_x) != (tile_y, tile_x)
                 and (get_diagonals or (adj_y == tile_y or adj_x == tile_x))
                 ]
@@ -400,14 +415,17 @@ class WFC_Problem(Problem):
 
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
-        world_indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
-        adjacent_states = [world_state[_y, _x] for (_y, _x) in world_indices_to_check]
-        potential_tiles_data = self.get_cell_potential_states(*adjacent_states)
+        # get adjacents' (y,x) coordinates. if out of bounds get a None instead.
+        adjacent_indices = self.adjacent_tiles_coords_with_outbounds(y, x, self._use_8cardinals)
+        # build adjacency setting outbounds as zeroes.
+        adjacent_states = [0 if idx is None else world_state[idx[0], idx[1]] for idx in adjacent_indices]
+        potential_tiles_data = self.get_cell_potential_states(*adjacent_states)  # must be given in correct order
 
         # check if adjacent, non-empty tiles, remain valid; if not, remove potential tile
         if not self._relaxed_validation:
+            adjacent_indices = [idx for idx in adjacent_indices if idx is not None]  # get rid of out of bounds items
             potential_tiles_data = self.validate_adjacent(potential_tiles_data, world_state,
-                                                          world_indices_to_check, y, x)
+                                                          adjacent_indices, y, x)
 
         # using the stored sample counts, compute each tile type probability
         tile_types, probabilities = self.map_to_probabilities(potential_tiles_data) or ([], None)

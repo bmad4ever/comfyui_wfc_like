@@ -1,9 +1,10 @@
-import numpy as np
-from _operator import xor
-from threading import Event, Thread
-from py_search.informed import best_first_search
-from comfy import utils
 from .wcf import WFC_Sample, WFC_Problem, ShareableList, ndarray
+from .shared_types import TemperatureConfig, SearchWeights
+from py_search.informed import best_first_search
+from threading import Event, Thread
+from _operator import xor
+from comfy import utils
+import numpy as np
 
 
 def waiting_loop(abort_loop_event: Event, pbar: utils.ProgressBar, total_steps, shm_name, ntasks=1):
@@ -196,7 +197,7 @@ class WFC_CustomTemperature:
     CATEGORY = "Bmad/WFC"
 
     def send(self, **kwargs):
-        return (kwargs,)
+        return ({"tconf": TemperatureConfig(**kwargs)},)
 
 
 class WFC_CustomValueWeights:
@@ -217,7 +218,7 @@ class WFC_CustomValueWeights:
     CATEGORY = "Bmad/WFC"
 
     def send(self, **kwargs):
-        return (kwargs,)
+        return ({"weights": SearchWeights(**kwargs)},)
 
 
 class WFC_EmptyState:

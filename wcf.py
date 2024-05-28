@@ -1,9 +1,10 @@
-from collections import defaultdict
-from functools import lru_cache, cache
+from .shared_types import TemperatureConfig, SearchWeights
 from multiprocessing.shared_memory import ShareableList
-import numpy as np
-from numpy import ndarray
 from py_search.base import Problem, Node
+from functools import lru_cache, cache
+from collections import defaultdict
+from numpy import ndarray
+import numpy as np
 import hashlib
 
 TILE_DIGEST_SIZE = 4  # in bytes
@@ -139,8 +140,8 @@ class WFC_Sample:
 class WFC_Problem(Problem):
     def __init__(self, sample: WFC_Sample, starting_state: ndarray, seed: int = 0, use_8_cardinals: bool = False,
                  relax_validation: bool = False, max_freq_adjust: float = 1, plateau_check_interval: int = -1,
-                 starting_temperature: float = 50, min_min_temperature: float = 0, max_min_temperature: float = 80,
-                 reverse_depth_w: float = 1, node_cost_w: float = 1, prev_state_avg_entropy_w: float = 0,
+                 tconf: TemperatureConfig = TemperatureConfig(50, 0, 80),
+                 weights: SearchWeights = SearchWeights(1, 1, 0),
                  stop_and_ticker_shm_list: ShareableList = None, pid: int = 0
                  ):
         """
@@ -155,13 +156,6 @@ class WFC_Problem(Problem):
                                        if the depth hasn't changed between checks, the search is stopped.
                                        Set to 0 (zero) to ignore plateau checks.
                                        Set to -1 (minus 1) to auto select depending on the number of nodes to process.
-        @param starting_temperature:
-        @param min_min_temperature:
-        @param max_min_temperature:
-        @param reverse_depth_w:
-        @param node_cost_w:
-        @param prev_state_avg_entropy_w:
-
         @param stop_and_ticker_shm_list: shared memory list.
                                         element at index=0 indicates whether to execution as been canceled or not.
                                         elements at index>1 will store the best depth for each of the generations.
@@ -173,7 +167,7 @@ class WFC_Problem(Problem):
         non_zeroes = np.count_nonzero(starting_state)
         self._number_of_tiles_to_process = starting_state.size - non_zeroes
         if self._number_of_tiles_to_process == 0:
-            self._stop = True
+            self._stop_search = True
             return
 
         # BASIC DATA
@@ -184,7 +178,7 @@ class WFC_Problem(Problem):
         self._relaxed_validation = relax_validation
 
         self._world_tdims = starting_state.shape
-        self._temp_world_state = starting_state.copy()
+        self._temp_world_state = starting_state.copy()  # keeps track of the world state of the node being processed
         self._starting_state = starting_state.copy() if non_zeroes > 0 else None
         # _starting_state has 2 internal uses:
         # 1. if None the center tile is set to open, otherwise the state is iterated to find the tiles at the edges
@@ -195,9 +189,9 @@ class WFC_Problem(Problem):
 
         # INFLUENCE COST WEIGHTS & FINAL NODE VALUE
         # influences the nodes' costs. high temperature lowers the influence of random noise and frequency adjustments
-        self._min_temperature = starting_temperature
-        self._min_min_temperature, self._max_min_temperature = min_min_temperature, max_min_temperature
-        self._rev_depth_w, self._node_cost_w, self._ps_avg_ent_w = reverse_depth_w, node_cost_w, prev_state_avg_entropy_w
+        self._min_temperature = tconf.starting_temperature
+        self._tconf = tconf
+        self._weights = weights
 
         # STOP THE SEARCH
         self._best_node = None
@@ -207,7 +201,7 @@ class WFC_Problem(Problem):
         self._plateau_stop_steps = self._world_tdims[0] * self._world_tdims[1] / 2.0 \
             if plateau_check_interval == -1 else plateau_check_interval
 
-        self._stop: bool = False  # stops the search; set to True when all the tiles are filled OR a plateau is reached
+        self._stop_search: bool = False  # stops the search; set to True when all the tiles are filled OR a plateau is reached
 
         # OTHERS
         self._use_8cardinals = use_8_cardinals
@@ -228,7 +222,7 @@ class WFC_Problem(Problem):
         b = [t, t, 0]
         self._tile_freq_adjustment_poly = np.poly1d(np.linalg.solve(a, b))
 
-    def is_generation_aborted(self) -> bool:
+    def generation_aborted(self) -> bool:
         return self._stop_and_ticker is not None and self._stop_and_ticker[0]
 
     @lru_cache(maxsize=8)
@@ -241,7 +235,7 @@ class WFC_Problem(Problem):
         return ratio
 
     def get_new_temperature(self, node_depth: int, prior_node_depth: int):
-        limit = self._max_min_temperature if node_depth <= prior_node_depth else self._min_min_temperature
+        limit = self._tconf.max_min_temperature if node_depth <= prior_node_depth else self._tconf.min_min_temperature
         ratio = self.temp_ratio(node_depth, prior_node_depth)
         return limit * ratio + self._min_temperature * (1 - ratio)
 
@@ -539,14 +533,14 @@ class WFC_Problem(Problem):
     def node_value(self, node: Node):
         return (
             # depth: can be used to prioritize nodes w/ high depth for a quicker generation
-                (1 + self._number_of_tiles_to_process - node.depth()) * self._rev_depth_w +
+                (1 + self._number_of_tiles_to_process - node.depth()) * self._weights.reverse_depth_w +
 
                 # cost: if temperature is high, this is the most promising locally,
                 # otherwise it can be somewhat random or steer the generation towards the sample's frequencies
-                node.cost() * self._node_cost_w +
+                node.cost() * self._weights.node_cost_w +
 
                 # extra: how "fuzzy" is the boundary ( unsure if useful )
-                node.extra * self._ps_avg_ent_w
+                node.extra * self._weights.prev_state_avg_entropy_w
         )
 
     def successors(self, node):
@@ -555,7 +549,7 @@ class WFC_Problem(Problem):
         Generate all possible next states
         """
 
-        if self.is_generation_aborted():
+        if self.generation_aborted():
             raise InterruptedError()
 
         # world state is kept in self._temp_world_state; updated here when closing the node.
@@ -575,52 +569,39 @@ class WFC_Problem(Problem):
             self._best_node = node
             if self._stop_and_ticker is not None:
                 self._stop_and_ticker[1 + self._pid] += 1
-        if depth >= self._number_of_tiles_to_process:
-            self._stop = True
-            print("\nEnded search with all tiles filled.")
+
+        if self.search_completed(depth) or self.search_plateaued():
             return
 
-        if self._plateau_stop_steps > 0:
-            self._plateau_check_ticker += 1
-            if self._plateau_check_ticker >= self._plateau_stop_steps:
-                if self._prev_best_depth == self._best_node.depth():
-                    self._stop = True
-                    print("\nEnded due to depth plateauing.")
-                    if self._stop_and_ticker is not None:
-                        self._stop_and_ticker[
-                            1 + self._pid] += self._number_of_tiles_to_process - self._best_node.depth()
-                    return
-                self._plateau_check_ticker = 0
-                self._prev_best_depth = self._best_node.depth()
+        # [ ( 0:(0:y, 1:x) , 1:( 0:states, 1:costs, 2:entropy) ), ... ]
+        potential_collapses: list[tuple[tuple[int, int], tuple[list[bytes], ndarray | None, float | None]]] = []
+        for (y, x) in self._temp_world_open_tiles:
+            states, costs, entropy = self.get_cell_potential_states_and_costs(y, x, world_state, depth)
 
-        iyxs = self._temp_world_open_tiles
-
-        def takewhile_and_last(predicate, iterable):
-            last_element = None
-            for item in iterable:
-                if predicate(item):
-                    yield item
-                else:
-                    last_element = item
-                    break
-            if last_element is None:
+            if entropy is None:
+                # if there are no possible states for a cell, this is an impossible state
+                # further computations on this node are not needed, abort this search branch
+                # note that the node as been closed, but updating the cost could help w/ debugging
+                node.node_cost = float("inf")
                 return
-            yield last_element
 
-        potential_collapses_it = (((y, x), self.get_cell_potential_states_and_costs(y, x, world_state, depth)) for
-                                  (y, x) in iyxs)
-        potential_collapses = list(
-            takewhile_and_last(lambda x: x[1][2] is not None and x[1][2] > 0, potential_collapses_it))
-        # [ ( 0:(x, y) , 1:( 0:states, 1:costs, 2:entropy) ) ]
+            potential_collapses.append(
+                (
+                    (y, x),
+                    (states, costs, entropy)
+                )
+            )
+
+            if not (entropy > 0.0):
+                # if entropy is 0, then this cell only has a possible state
+                # collapse it, and abort other search branches coming out of this node
+                potential_collapses = [potential_collapses[-1]]
+                break
 
         # check if last is impossible
-        if len(potential_collapses) == 0 or potential_collapses[-1][1][2] is None:
+        if len(potential_collapses) == 0:  # or potential_collapses[-1][1][2] is None:
             node.node_cost = float("inf")  # the node has now been closed, but it could help w/ debugging
             return
-
-        # check if last element has entropy zero, if so, it should be the only one expanded ( a collapse )
-        if potential_collapses[-1][1][2] == 0:
-            potential_collapses = [potential_collapses[-1]]
 
         # print(f"depth = {depth:5,.0f}  |  temperature={self._min_temperature:5,.1f}  |  "
         #      f"freq_depth_adjustment={self._tile_freq_adjustment_func(depth):6,.2f}  |  "
@@ -631,25 +612,53 @@ class WFC_Problem(Problem):
 
         for (y, x), (potential_states, costs, entropy) in potential_collapses:
             items = zip(potential_states, costs)
-
-            # if self._temperature > xxx:  # TODO consider making this an option set by the user
-            #    # items = sorted(items, key=itemgetter(1))[:2]
-            #    items = sorted(items, key=itemgetter(1))
-            #    take = round(2 * self._temperature / self._max_temperature + len(items) * (
-            #                1 - self._temperature / self._max_temperature))
-            #    items = items[:take]
-
+            # items = prune_search(items)  # temperature based pruning has not been implemented yet
             for tile_type, cost in items:
                 action = ((y, x), tile_type)
                 state = node.state[1] ^ hash(action)  # zobrist like
                 yield Node(state=(depth + 1, state), parent=node, action=action, node_cost=cost,
                            extra=boundary_avg_entropy)
 
+    def search_completed(self, depth) -> bool:
+        if depth >= self._number_of_tiles_to_process:
+            self._stop_search = True
+            print("\nEnded search with all tiles filled.")
+            return True
+        return False
+
+    def search_plateaued(self) -> bool:
+        if self._plateau_stop_steps > 0:
+            self._plateau_check_ticker += 1
+            if self._plateau_check_ticker >= self._plateau_stop_steps:
+                if self._prev_best_depth == self._best_node.depth():
+                    self._stop_search = True
+                    print("\nEnded due to depth plateauing.")
+                    if self._stop_and_ticker is not None:
+                        self._stop_and_ticker[1 + self._pid] = self._number_of_tiles_to_process
+                    return True
+                self._plateau_check_ticker = 0
+                self._prev_best_depth = self._best_node.depth()
+        return False
+
+    def prune_search(self, items):
+        raise NotImplementedError("Search pruning based on temperature has not been fully implemented")
+        from _operator import itemgetter
+
+        if self._min_temperature < temperature_thresh:
+            return items
+
+        items = sorted(items, key=itemgetter(1))
+        items_len = len(items)
+        take = round(items_len * (1 - self._min_temperature / self._tconf.max_min_temperature))
+        take = min(max(take, 2), items_len)
+        items = items[:take]
+        return items
+
     def goal_test(self, state_node, goal_node=None):
         # state is not kept in each node, so the checks are done when closing a node.
         # goal_test is only defined to terminate the search;
         # the real goal test is done in the successors method
-        return self._stop
+        return self._stop_search
 
     def get_world_state(self, last_node: Node, current_node: Node):
         start_depth = min(last_node.depth(), current_node.depth())

@@ -40,7 +40,12 @@ def terminate_generation(finished_event, shm_list, pbt: Thread):
         throw_exception_if_processing_interrupted()
 
 
-class WFC_SampleNode:
+class WFC_BaseNode:
+    FUNCTION = "do"
+    CATEGORY = "Bmad/WFC"
+
+
+class WFC_SampleNode(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -55,10 +60,8 @@ class WFC_SampleNode:
 
     RETURN_TYPES = ("WFC_Sample", "IMAGE",)
     RETURN_NAMES = ("sample", "unique_tiles",)
-    FUNCTION = "compute"
-    CATEGORY = "Bmad/WFC"
 
-    def compute(self, img_batch, tile_width, tile_height, output_tiles):
+    def do(self, img_batch, tile_width, tile_height, output_tiles):
         import torch
 
         samples = [np.clip(255. * img_batch[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
@@ -75,7 +78,7 @@ class WFC_SampleNode:
         return (sample, tiles,)
 
 
-class WFC_GenerateNode:
+class WFC_GenerateNode(WFC_BaseNode):
     @staticmethod
     def NODE_INPUT_TYPES():
         return {
@@ -102,10 +105,8 @@ class WFC_GenerateNode:
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state", "unique_tiles",)
-    FUNCTION = "compute"
-    CATEGORY = "Bmad/WFC"
 
-    def compute(self, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
+    def do(self, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
         if custom_temperature_config is not None:
             kwargs.update(custom_temperature_config)
 
@@ -133,7 +134,7 @@ class WFC_GenerateNode:
         return (result,)
 
 
-class WFC_Encode:
+class WFC_Encode(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -146,16 +147,14 @@ class WFC_Encode:
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state",)
-    FUNCTION = "compute"
-    CATEGORY = "Bmad/WFC"
 
-    def compute(self, img, sample: WFC_Sample):
+    def do(self, img, sample: WFC_Sample):
         samples = [np.clip(255. * img[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8) for i in range(img.shape[0])]
         encoded = sample.img_to_tile_encoded_world(samples[0])  # no batch enconding, only a single image is encoded
         return (encoded,)
 
 
-class WFC_Decode:
+class WFC_Decode(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -167,10 +166,8 @@ class WFC_Decode:
         }
 
     RETURN_TYPES = ("IMAGE", "MASK")
-    FUNCTION = "compute"
-    CATEGORY = "Bmad/WFC"
 
-    def compute(self, state, sample: WFC_Sample):
+    def do(self, state, sample: WFC_Sample):
         import torch
 
         img, mask = sample.tile_encoded_to_img(state)
@@ -179,7 +176,7 @@ class WFC_Decode:
         return (img, mask,)
 
 
-class WFC_CustomTemperature:
+class WFC_CustomTemperature(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -193,14 +190,12 @@ class WFC_CustomTemperature:
 
     RETURN_TYPES = ("WFC_TemperatureConfig",)
     RETURN_NAMES = ("temperature",)
-    FUNCTION = "send"
-    CATEGORY = "Bmad/WFC"
 
-    def send(self, **kwargs):
+    def do(self, **kwargs):
         return ({"tconf": TemperatureConfig(**kwargs)},)
 
 
-class WFC_CustomValueWeights:
+class WFC_CustomValueWeights(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -214,14 +209,12 @@ class WFC_CustomValueWeights:
 
     RETURN_TYPES = ("WFC_NodeValueConfig",)
     RETURN_NAMES = ("weights",)
-    FUNCTION = "send"
-    CATEGORY = "Bmad/WFC"
 
-    def send(self, **kwargs):
+    def do(self, **kwargs):
         return ({"weights": SearchWeights(**kwargs)},)
 
 
-class WFC_EmptyState:
+class WFC_EmptyState(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -234,14 +227,12 @@ class WFC_EmptyState:
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state",)
-    FUNCTION = "create"
-    CATEGORY = "Bmad/WFC"
 
-    def create(self, width, height):
+    def do(self, width, height):
         return (np.zeros((width, height)),)
 
 
-class WFC_Filter:
+class WFC_Filter(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -255,10 +246,8 @@ class WFC_Filter:
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state",)
-    FUNCTION = "create"
-    CATEGORY = "Bmad/WFC"
 
-    def create(self, state: ndarray, tiles_batch, invert):
+    def do(self, state: ndarray, tiles_batch, invert):
         to_filter = [WFC_Sample.tile_to_hash(
             np.clip(255. * tiles_batch[i].cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
             for i in range(tiles_batch.shape[0])]
@@ -294,7 +283,7 @@ def generate_single(stop_and_ticker_shm_name, i_kwargs, pid=0): #stop, ticker,
 
 
 
-class WFC_GenParallel:
+class WFC_GenParallel(WFC_BaseNode):
     @classmethod
     def INPUT_TYPES(cls):
         gen_types = WFC_GenerateNode.NODE_INPUT_TYPES()
@@ -303,12 +292,10 @@ class WFC_GenParallel:
 
     RETURN_TYPES = ("WFC_State",)
     RETURN_NAMES = ("state",)
-    FUNCTION = "gen"
-    CATEGORY = "Bmad/WFC"
     INPUT_IS_LIST = True
     OUTPUT_IS_LIST = (True,)
 
-    def gen(self, max_parallel_tasks, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
+    def do(self, max_parallel_tasks, custom_temperature_config=None, custom_node_value_config=None, **kwargs):
         from joblib import Parallel, delayed
 
         max_parallel_tasks = max_parallel_tasks[0]

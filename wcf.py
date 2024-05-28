@@ -400,8 +400,7 @@ class WFC_Problem(Problem):
 
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
-        # dev note : adjacent tiles takes into account card type and world limits
-        world_indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals) #[(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
+        world_indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals)
         adjacent_states = [world_state[_y, _x] for (_y, _x) in world_indices_to_check]
         potential_tiles_data = self.get_cell_potential_states(*adjacent_states)
 

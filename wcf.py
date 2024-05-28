@@ -73,7 +73,6 @@ class WFC_Sample:
         new_height = tile_height * height_in_tiles
         new_width  = tile_width * width_in_tiles
         adjusted_image = img.copy()[0:new_height, 0:new_width, :]
-        print(adjusted_image.shape)
 
         return adjusted_image, height_in_tiles, width_in_tiles
 
@@ -212,6 +211,9 @@ class WFC_Problem(Problem):
 
         # OTHERS
         self._use_8cardinals = use_8_cardinals
+        self.get_cell_potential_states = \
+            self.get_cell_potential_states_8cardinals if use_8_cardinals\
+            else self.get_cell_potential_states_4cardinals
 
         tile_data = sample.get_tile_data()
         self._tile_counts = dict(zip(tile_data.keys(), [0] * len(tile_data)))
@@ -398,13 +400,10 @@ class WFC_Problem(Problem):
 
     def get_cell_potential_states_and_costs(self, y, x, world_state, depth) -> \
             tuple[list[bytes], ndarray | None, float | None]:
-        world_indices_to_check = [(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
-        adjacent_states = [world_state[_y, _x] if 0 <= _y < world_state.shape[0] and 0 <= _x < world_state.shape[1]
-                           else 0 for (_y, _x) in world_indices_to_check]
-        potential_tiles_data = \
-            self.get_cell_potential_states_8cardinals(*adjacent_states) \
-                if self._use_8cardinals else \
-                self.get_cell_potential_states_4cardinals(*[adjacent_states[i] for i in [1, 3, 4, 6]])
+        # dev note : adjacent tiles takes into account card type and world limits
+        world_indices_to_check = self.adjacent_tiles_coords(y, x, self._use_8cardinals) #[(y - 1 + _y, x - 1 + _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
+        adjacent_states = [world_state[_y, _x] for (_y, _x) in world_indices_to_check]
+        potential_tiles_data = self.get_cell_potential_states(*adjacent_states)
 
         # check if adjacent, non-empty tiles, remain valid; if not, remove potential tile
         if not self._relaxed_validation:

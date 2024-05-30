@@ -3,7 +3,7 @@ from multiprocessing.shared_memory import ShareableList
 from py_search.base import Problem, Node
 from functools import lru_cache, cache
 from collections import defaultdict
-from typing import TypeAlias, Callable, Any
+from typing import TypeAlias, Callable
 from numpy import ndarray
 import numpy as np
 import hashlib
@@ -113,7 +113,6 @@ class WFC_Sample:
         tiles = tiles.reshape(-1, tile_height, tile_width, src_shape[2])
         utiles, counts = np.unique(tiles, axis=0, return_counts=True)
         ut_hashes = [WFC_Sample.tile_to_hash(tile) for tile in utiles]
-        # assert len(set(ut_hashes)) == len(ut_hashes)
 
         tiles_data = dict(zip(ut_hashes, zip(utiles, counts / tiles.shape[0])))
         hashed_tiles = np.array([WFC_Sample.tile_to_hash(tile) for tile in tiles])
@@ -242,6 +241,26 @@ class WFC_Problem(Problem):
             self.get_cell_potential_states_8cardinals if use_8_cardinals
             else self.get_cell_potential_states_4cardinals
         )
+        """
+        Function that will get the potential states for a given cell. Will be different depending on used cardinals. 
+        """
+        self._reverse_roi_kernel_indices: list[TileType] = (
+            sorted([i for i in range(9) if i not in [1, 3, 4, 5, 7]], reverse=True)
+            if not use_8_cardinals  # i.e. if using 4 cardinals remove corners
+            else []
+        )
+        """
+        The indices that do not belong in the roi. I.e. The corners when using 4 cardinals, or none when using 8.
+        The indices are sorted in descending order.
+        """
+        self._is_tile_valid: Callable[..., bool] = (
+            self._is_tile_valid_8cardinals
+            if use_8_cardinals
+            else self._is_tile_valid_4cardinals
+        )
+        """
+        Verifies if a tile is valid for a given set of neighbors. Zeroes are used as wildcards.
+        """
 
         # setup other functions
         self._update_state: Callable[[Node, Node], None] = self._zero_depth_setup
@@ -409,7 +428,7 @@ class WFC_Problem(Problem):
         )
 
     @cache
-    def tile_remains_valid_4cardinals(self, p2, p4, p5, p6, p8):
+    def _is_tile_valid_4cardinals(self, p2, p4, p5, p6, p8):
         """[p1->tl, ..., p9->br] ; where p5 is the center tile"""
         super_tile_data = self._sample.get_super_tile_data()
 
@@ -422,7 +441,7 @@ class WFC_Problem(Problem):
         return any(is_possible(stile) for stile, _ in super_tile_data)
 
     @cache
-    def tile_remains_valid_8cardinals(self, p1, p2, p3, p4, p5, p6, p7, p8, p9):
+    def _is_tile_valid_8cardinals(self, p1, p2, p3, p4, p5, p6, p7, p8, p9):
         super_tile_data = self._sample.get_super_tile_data()
 
         def is_possible(super_tile):
@@ -455,19 +474,18 @@ class WFC_Problem(Problem):
         def check_if_all_adjacent_tiles_remain_valid_v2(tile_type):
             roi_matrix[2, 2] = tile_type  # simulate tile placement
             for y, x in indices_to_check:
-                if roi_matrix[y - wy + 2, x - wx + 2] == 0:
+                y_center, x_center = y - wy + 2, x - wx + 2  # 3x3 sub region center
+
+                if roi_matrix[y_center, x_center] == 0:  # detail: out of bound tiles are also zeroes
                     continue
 
-                # get the corresponding values from the 5x5 roi_matrix
-                adjacent_states = roi_matrix[y - wy + 2 - 1:y - wy + 2 + 2,
-                                  x - wx + 2 - 1:x - wx + 2 + 2].flatten().tolist()
+                sub_roi_3x3 = roi_matrix[y_center - 1:y_center + 2, x_center - 1:x_center + 2]
+                adjacent_states = sub_roi_3x3.flatten().tolist()
+                for index in self._reverse_roi_kernel_indices:  # remove corners if using 4 cardinals
+                    del adjacent_states[index]
 
-                if self._use_8cardinals:
-                    if not self.tile_remains_valid_8cardinals(*adjacent_states):
-                        return False
-                else:
-                    if not self.tile_remains_valid_4cardinals(*[adjacent_states[i] for i in [1, 3, 4, 5, 7]]):
-                        return False
+                if not self._is_tile_valid(*adjacent_states):
+                    return False
 
             return True
 
@@ -538,8 +556,6 @@ class WFC_Problem(Problem):
 
         counts = np.array(list(pcs.values()), dtype=np.float32)
         probabilities = counts / counts.sum()
-
-        # assert (probabilities <= 1).all(), "Probabilities must be less than or equal to 1"
 
         return list(pcs.keys()), probabilities
 

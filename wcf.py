@@ -639,7 +639,7 @@ class WFC_Problem(Problem):
 
         for (y, x), (potential_states, costs, entropy) in potential_collapses:
             items = zip(potential_states, costs)
-            # items = prune_search(items)  # temperature based pruning has not been implemented yet
+            # TODO prune search -> temperature based pruning has not been implemented yet
             for tile_type, cost in items:
                 action: WFC_Action = ((y, x), tile_type)
                 state = node.state[1] ^ hash(action)  # zobrist like
@@ -796,10 +796,10 @@ class WFC_Problem(Problem):
         self.close_node(*pos)
 
     def _prune_search(self, items):
-        raise NotImplementedError("Search pruning based on temperature has not been fully implemented")
+        print("Search pruning based on temperature has not been fully implemented")
         from _operator import itemgetter
 
-        if self._min_temperature < temperature_thresh:
+        if self._min_temperature < self.temperature_thresh:
             return items
 
         items = sorted(items, key=itemgetter(1))

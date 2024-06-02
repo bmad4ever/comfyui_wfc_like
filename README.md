@@ -1,8 +1,11 @@
 # comfyui_wfc_like
 An "opinionated" Wave Function Collapse implementation with a set of nodes for comfyui.
 
+The [**workflows** folder](./workflows) contains workflow examples and also the sample image used as input (*sample_img.png*).
+The tileset used in the sample image is cc0, and is available at [opengameart/mage-city](https://opengameart.org/content/mage-city-arcanos).
+
 <details>
-<summary>Usage and implementation clarifications</summary>
+<summary>Usage and Implementation clarifications</summary>
 <br>
 
 This implementation is not a pure-to-form implementation of the wave collapse algorithm. 

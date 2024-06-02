@@ -767,19 +767,11 @@ class WFC_Problem(Problem):
             self._temp_world_open_tiles.add((self._world_tdims[0] // 2, self._world_tdims[1] // 2))
             return
         # otherwise -> find all in starting state
-
-        relative_indices_to_check = [(_y, _x) for _y in range(3) for _x in range(3) if _y != 1 or _x != 1]
-        if not self._use_8cardinals:
-            relative_indices_to_check = [relative_indices_to_check[i] for i in [1, 3, 4, 6]]
-
         wost = self._temp_world_open_tiles
         for (y, x), tile in np.ndenumerate(self._starting_state):
             if tile != 0:
                 continue
-            indices_to_check = [(__y, __x) for (_y, _x) in relative_indices_to_check
-                                if 0 <= (__y := y + _y) < self._temp_world_state.shape[0]
-                                and 0 <= (__x := x + _x) < self._temp_world_state.shape[1]]
-
+            indices_to_check = self.adjacent_tiles_coords(y, x)
             if any(self._starting_state[__y, __x] != 0 for (__y, __x) in indices_to_check):
                 wost.add((y, x))
 

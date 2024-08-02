@@ -2,7 +2,7 @@
 name = "comfyui_wfc_like"
 description = "An 'opinionated' Wave Function Collapse implementation with a set of nodes for comfyui"
 version = "1.0.0"
-license = "LICENSE"
+license = { file = "LICENSE" }
 dependencies = ["py_search"]
 
 [project.urls]
